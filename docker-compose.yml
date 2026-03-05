@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  fronius2vim:
+    build: .
+    container_name: fronius2vim
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - FRONIUS_HOST=172.20.203.100
+      - VICTORIAMETRICS_URL=http://172.20.204.22:8428
+      - REALTIME_INTERVAL=10
+      - ENERGY_INTERVAL=900
+      - WEB_PORT=8080
+      - LOG_LEVEL=INFO
+    networks:
+      - fronius2vim-net
+
+networks:
+  fronius2vim-net:
+    driver: bridge
