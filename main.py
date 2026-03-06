@@ -305,35 +305,70 @@ HTML_DASHBOARD = """
     <div class="timestamp" id="timestamp">--</div>
 
     <div class="chart-container">
-        <div class="chart-title">⚡ Energy Generation Today (kWh per 15min)</div>
-        <canvas id="energyChart"></canvas>
+        <div class="chart-title">⚡ Energy Generation & Power Output Today</div>
+        <canvas id="combinedChart"></canvas>
     </div>
 
     <script>
         let ws = null;
         
-        // Chart.js setup for historical data
-        const ctx = document.getElementById('energyChart').getContext('2d');
-        const energyChart = new Chart(ctx, {
+        // Chart.js setup for combined chart (bars + line with dual y-axes)
+        const ctx = document.getElementById('combinedChart').getContext('2d');
+        const combinedChart = new Chart(ctx, {
             type: 'bar',
             data: {
                 labels: [],
-                datasets: [{
-                    label: 'kWh Generated',
-                    data: [],
-                    backgroundColor: 'rgba(78, 204, 163, 0.7)',
-                    borderColor: 'rgba(78, 204, 163, 1)',
-                    borderWidth: 1
-                }]
+                datasets: [
+                    {
+                        label: 'kWh Generated (bars)',
+                        data: [],
+                        backgroundColor: 'rgba(78, 204, 163, 0.7)',
+                        borderColor: 'rgba(78, 204, 163, 1)',
+                        borderWidth: 1,
+                        yAxisID: 'y'
+                    },
+                    {
+                        label: 'Power (W) - line',
+                        data: [],
+                        type: 'line',
+                        borderColor: 'rgba(255, 206, 86, 1)',
+                        backgroundColor: 'rgba(255, 206, 86, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        pointRadius: 2,
+                        yAxisID: 'y1'
+                    }
+                ]
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: true,
                 scales: {
                     y: {
+                        type: 'linear',
+                        display: true,
+                        position: 'left',
                         beginAtZero: true,
                         grid: { color: 'rgba(255, 255, 255, 0.1)' },
-                        ticks: { color: '#888' }
+                        ticks: { color: '#888' },
+                        title: {
+                            display: true,
+                            text: 'kWh',
+                            color: '#4ecca3'
+                        }
+                    },
+                    y1: {
+                        type: 'linear',
+                        display: true,
+                        position: 'right',
+                        beginAtZero: true,
+                        grid: { display: false },
+                        ticks: { color: '#ffce56' },
+                        title: {
+                            display: true,
+                            text: 'Watts',
+                            color: '#ffce56'
+                        }
                     },
                     x: {
                         grid: { color: 'rgba(255, 255, 255, 0.1)' },
@@ -348,25 +383,37 @@ HTML_DASHBOARD = """
             }
         });
 
-        // Fetch historical data
-        async function fetchHistory() {
+        // Fetch combined data
+        async function fetchCombinedData() {
             try {
-                const response = await fetch('/api/history');
-                const data = await response.json();
+                const [historyRes, powerRes] = await Promise.all([
+                    fetch('/api/history'),
+                    fetch('/api/power')
+                ]);
                 
-                if (data.intervals && data.intervals.length > 0) {
-                    energyChart.data.labels = data.intervals.map(i => i.time);
-                    energyChart.data.datasets[0].data = data.intervals.map(i => i.kwh);
-                    energyChart.update();
+                const historyData = await historyRes.json();
+                const powerData = await powerRes.json();
+                
+                // Use energy data as the base (15min intervals)
+                if (historyData.intervals && historyData.intervals.length > 0) {
+                    combinedChart.data.labels = historyData.intervals.map(i => i.time);
+                    combinedChart.data.datasets[0].data = historyData.intervals.map(i => i.kwh);
                 }
+                
+                // Add power data
+                if (powerData.points && powerData.points.length > 0) {
+                    combinedChart.data.datasets[1].data = powerData.points.map(p => p.power);
+                }
+                
+                combinedChart.update();
             } catch (error) {
-                console.error('Failed to fetch history:', error);
+                console.error('Failed to fetch combined data:', error);
             }
         }
 
-        // Fetch history on load and every 5 minutes
-        fetchHistory();
-        setInterval(fetchHistory, 300000);
+        // Fetch data on load and every 5 minutes
+        fetchCombinedData();
+        setInterval(fetchCombinedData, 300000);
         
         function connect() {
             ws = new WebSocket(`ws://${window.location.host}/ws`);
@@ -479,6 +526,52 @@ async def get_history():
     except Exception as e:
         logger.error(f"Failed to fetch history: {e}")
         return {"intervals": [], "error": str(e)}
+
+
+@app.get("/api/power")
+async def get_power():
+    """Query VictoriaMetrics for today's power data (watts)"""
+    try:
+        # Calculate today's start timestamp (midnight)
+        now = datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_timestamp = int(start_of_day.timestamp())
+
+        # Query VictoriaMetrics for power data today (avg over 15min to match energy intervals)
+        query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
+        params = {
+            "query": "avg_over_time(fronius_power_watts[15m])",
+            "start": start_timestamp,
+            "end": int(now.timestamp()),
+            "step": "15m",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(query_url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("status") == "success" and data.get("data", {}).get("result"):
+                result = data["data"]["result"][0]
+                values = result.get("values", [])
+
+                points = []
+                for value in values:
+                    timestamp = int(value[0])
+                    power = float(value[1])
+                    points.append(
+                        {
+                            "time": datetime.fromtimestamp(timestamp).strftime("%H:%M"),
+                            "power": round(power, 0),
+                        }
+                    )
+
+                return {"points": points}
+
+        return {"points": []}
+    except Exception as e:
+        logger.error(f"Failed to fetch power: {e}")
+        return {"points": [], "error": str(e)}
 
 
 @app.websocket("/ws")
