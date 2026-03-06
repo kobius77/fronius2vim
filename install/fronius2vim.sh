@@ -44,7 +44,8 @@ fi
 # 2. Basic WHIPTAIL UI for Settings
 NEXTID=$(pvesh get /cluster/nextid)
 
-CTID=$(whiptail --title "fronius2vim LXC" --inputbox "Enter Container ID" 10 58 $NEXTID --3d 3>&1 1>&2 2>&3)
+set +e
+CTID=$(whiptail --title "fronius2vim LXC" --inputbox "Enter Container ID" 10 58 $NEXTID 3>&1 1>&2 2>&3)
 exitstatus=$?
 if [ $exitstatus != 0 ]; then
     echo "Cancelled."
@@ -55,12 +56,13 @@ STORAGES=$(pvesm status -content rootdir | awk 'NR>1 {print $1}')
 DEFAULT_STORAGE=$(echo "$STORAGES" | grep -E "local-lvm|local-zfs" | head -n 1 || true)
 if [ -z "$DEFAULT_STORAGE" ]; then DEFAULT_STORAGE=$(echo "$STORAGES" | head -n 1); fi
 
-STORAGE=$(whiptail --title "fronius2vim LXC" --inputbox "Enter Storage Pool for Container" 10 58 $DEFAULT_STORAGE --3d 3>&1 1>&2 2>&3)
+STORAGE=$(whiptail --title "fronius2vim LXC" --inputbox "Enter Storage Pool for Container" 10 58 $DEFAULT_STORAGE 3>&1 1>&2 2>&3)
 exitstatus=$?
 if [ $exitstatus != 0 ]; then
     echo "Cancelled."
     exit 1
 fi
+set -e
 
 # 3. Download Debian 12 Template
 msg_info "Updating container templates"
