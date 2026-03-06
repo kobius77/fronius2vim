@@ -367,8 +367,6 @@ HTML_DASHBOARD = """
         // Fetch history on load and every 5 minutes
         fetchHistory();
         setInterval(fetchHistory, 300000);
-
-        let ws = null;
         
         function connect() {
             ws = new WebSocket(`ws://${window.location.host}/ws`);
