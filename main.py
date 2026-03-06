@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 
 # Configuration
+# Default IPs hardcoded for this deployment
 FRONIUS_HOST = os.getenv("FRONIUS_HOST", "172.20.203.100")
 VICTORIAMETRICS_URL = os.getenv("VICTORIAMETRICS_URL", "http://172.20.204.22:8428")
 REALTIME_INTERVAL = int(os.getenv("REALTIME_INTERVAL", "10"))

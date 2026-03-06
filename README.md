@@ -47,11 +47,22 @@ Access the dashboard at http://localhost:8080
 | `WEB_PORT` | `8080` | Web UI port |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
-### Proxmox Installation
+### Proxmox Installation (Recommended)
+
+One-command automatic installation on Proxmox VE:
 
 ```bash
 bash -c "$(wget -qLO - https://raw.githubusercontent.com/kobius77/fronius2vim/main/install/fronius2vim.sh)"
 ```
+
+This will:
+- Create a Debian 12 LXC container
+- Install Python and dependencies
+- Clone and configure fronius2vim
+- Start the service automatically
+- No Docker required!
+
+Access the dashboard at `http://<container-ip>:8080`
 
 ## API Endpoints
 
