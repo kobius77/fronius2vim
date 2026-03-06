@@ -325,7 +325,8 @@ HTML_DASHBOARD = """
                         backgroundColor: 'rgba(78, 204, 163, 0.7)',
                         borderColor: 'rgba(78, 204, 163, 1)',
                         borderWidth: 1,
-                        yAxisID: 'y'
+                        yAxisID: 'y',
+                        order: 2
                     },
                     {
                         label: 'Power (kW) - line',
@@ -336,7 +337,8 @@ HTML_DASHBOARD = """
                         borderWidth: 2,
                         tension: 0.4,
                         pointRadius: 0,
-                        yAxisID: 'y1'
+                        yAxisID: 'y1',
+                        order: 1
                     }
                 ]
             },
