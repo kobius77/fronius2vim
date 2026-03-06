@@ -94,8 +94,9 @@ systemctl daemon-reload
 systemctl enable --now fronius2vim.service
 msg_ok "Created Service"
 
-motd_ssh
-customize
+# Optional: motd_ssh if available from build.func
+type motd_ssh &>/dev/null && motd_ssh
+type customize &>/dev/null && customize
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
