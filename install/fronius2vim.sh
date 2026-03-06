@@ -19,6 +19,19 @@ variables
 color
 catch_errors
 
+# Fallback functions if build.func doesn't provide them
+function motd_ssh() {
+  if [[ -f /etc/motd ]]; then
+    echo -e "fronius2vim Dashboard: http://$IP:8080" >> /etc/motd
+  fi
+}
+
+function customize() {
+  if command -v apt-get &> /dev/null; then
+    $STD apt-get update
+  fi
+}
+
 function update_script() {
   header_info
   check_container_storage
@@ -94,9 +107,8 @@ systemctl daemon-reload
 systemctl enable --now fronius2vim.service
 msg_ok "Created Service"
 
-# Optional: motd_ssh if available from build.func
-type motd_ssh &>/dev/null && motd_ssh
-type customize &>/dev/null && customize
+motd_ssh
+customize
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
