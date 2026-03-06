@@ -19,8 +19,9 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
 
   watchtower:
-    image: containrrr/watchtower
+    image: containrrr/watchtower:latest
     container_name: watchtower
+    pull_policy: always
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
