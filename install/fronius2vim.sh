@@ -62,7 +62,14 @@ start
 build_container
 description
 
+msg_info "Setting up SSH Access"
+$STD apt-get install -y openssh-server
+install_ssh_keys_into_ct
+$STD systemctl enable ssh
+msg_ok "SSH Access configured"
+
 msg_info "Installing Dependencies"
+$STD apt-get install -y openssh-server
 $STD apt-get update
 $STD apt-get install -y git python3-pip python3-venv
 msg_ok "Installed Dependencies"
