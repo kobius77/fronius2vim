@@ -1,97 +1,134 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
-# Copyright (c) 2021-2026 community-scripts
-# Author: fronius2vim
-# License: MIT | https://github.com/kobius77/fronius2vim/raw/main/LICENSE
+
+# fronius2vim Proxmox LXC Installer
 # Source: https://github.com/kobius77/fronius2vim
 
-APP="fronius2vim"
-var_tags="${var_tags:-monitoring;photovoltaic}"
-var_cpu="${var_cpu:-1}"
-var_ram="${var_ram:-512}"
-var_disk="${var_disk:-4}"
-var_os="${var_os:-debian}"
-var_version="${var_version:-12}"
-var_unprivileged="${var_unprivileged:-1}"
+set -e
 
-header_info "$APP"
-variables
-color
-catch_errors
+# --- UI Colors ---
+YW=$(echo "\033[33m")
+BL=$(echo "\033[36m")
+RD=$(echo "\033[01;31m")
+BGN=$(echo "\033[4;92m")
+GN=$(echo "\033[1;92m")
+DGN=$(echo "\033[32m")
+CL=$(echo "\033[m")
+BFR="\\r\\033[K"
+HOLD="-"
+CM="${GN}✓${CL}"
+CROSS="${RD}✗${CL}"
 
-# Fallback functions if build.func doesn't provide them
-function motd_ssh() {
-  if [[ -f /etc/motd ]]; then
-    echo -e "fronius2vim Dashboard: http://$IP:8080" >> /etc/motd
-  fi
+echo -e "${BL}Starting fronius2vim LXC creation...${CL}"
+
+function msg_info() {
+    local msg="$1"
+    echo -ne " ${HOLD} ${YW}${msg}..."
 }
 
-function customize() {
-  if command -v apt-get &> /dev/null; then
-    $STD apt-get update
-  fi
+function msg_ok() {
+    local msg="$1"
+    echo -e "${BFR} ${CM} ${GN}${msg}${CL}"
 }
 
-function update_script() {
-  header_info
-  check_container_storage
-  check_container_resources
-  if [[ ! -f /etc/systemd/system/fronius2vim.service ]]; then
-    msg_error "No ${APP} Installation Found!"
-    exit
-  fi
-  
-  msg_info "Stopping fronius2vim"
-  systemctl stop fronius2vim
-  msg_ok "Stopped fronius2vim"
-
-  msg_info "Updating fronius2vim"
-  cd /opt/fronius2vim
-  git pull
-  pip install -r requirements.txt --quiet
-  msg_ok "Updated fronius2vim"
-
-  msg_info "Starting fronius2vim"
-  systemctl start fronius2vim
-  msg_ok "Started fronius2vim"
-  msg_ok "Updated successfully!"
-  exit
+function msg_error() {
+    local msg="$1"
+    echo -e "${BFR} ${CROSS} ${RD}${msg}${CL}"
 }
 
-start
-build_container
-description
-
-msg_info "Setting up SSH Access"
-$STD apt-get install -y openssh-server
-install_ssh_keys_into_ct
-$STD systemctl enable ssh
-msg_ok "SSH Access configured"
-
-msg_info "Installing Dependencies"
-$STD apt-get install -y openssh-server
-$STD apt-get update
-$STD apt-get install -y git python3-pip python3-venv
-msg_ok "Installed Dependencies"
-
-msg_info "Setting up fronius2vim"
-if [ -d "/opt/fronius2vim/.git" ]; then
-  cd /opt/fronius2vim
-  git pull
-else
-  rm -rf /opt/fronius2vim
-  git clone https://github.com/kobius77/fronius2vim.git /opt/fronius2vim
-  cd /opt/fronius2vim
+# 1. Check Root
+if [[ "$(id -u)" -ne 0 ]]; then
+    msg_error "This script must be run as root."
+    exit 1
 fi
 
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt --quiet
-deactivate
+# 2. Basic WHIPTAIL UI for Settings
+NEXTID=$(pvesh get /cluster/nextid)
+
+CTID=$(whiptail --title "fronius2vim LXC" --inputbox "Enter Container ID" 10 58 $NEXTID --3d 3>&1 1>&2 2>&3)
+exitstatus=$?
+if [ $exitstatus != 0 ]; then
+    echo "Cancelled."
+    exit 1
+fi
+
+STORAGES=$(pvesm status -content rootdir | awk 'NR>1 {print $1}')
+DEFAULT_STORAGE=$(echo "$STORAGES" | grep -E "local-lvm|local-zfs" | head -n 1 || true)
+if [ -z "$DEFAULT_STORAGE" ]; then DEFAULT_STORAGE=$(echo "$STORAGES" | head -n 1); fi
+
+STORAGE=$(whiptail --title "fronius2vim LXC" --inputbox "Enter Storage Pool for Container" 10 58 $DEFAULT_STORAGE --3d 3>&1 1>&2 2>&3)
+exitstatus=$?
+if [ $exitstatus != 0 ]; then
+    echo "Cancelled."
+    exit 1
+fi
+
+# 3. Download Debian 12 Template
+msg_info "Updating container templates"
+pveam update >/dev/null
+msg_ok "Updated container templates"
+
+TEMPLATE=$(pveam available -section system | grep "debian-12-standard" | head -1 | awk '{print $2}')
+if [ -z "$TEMPLATE" ]; then
+    msg_error "Could not find Debian 12 template."
+    exit 1
+fi
+TEMPLATE_FILE=$(basename "$TEMPLATE")
+
+if ! pveam list local | grep -q "$TEMPLATE_FILE"; then
+    msg_info "Downloading $TEMPLATE_FILE"
+    pveam download local $TEMPLATE >/dev/null
+    msg_ok "Downloaded $TEMPLATE_FILE"
+fi
+
+# 4. Create the container
+msg_info "Creating LXC Container"
+pct create $CTID local:vztmpl/$TEMPLATE_FILE \
+    --arch amd64 \
+    --hostname fronius2vim \
+    --cores 1 \
+    --memory 512 \
+    --swap 0 \
+    --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+    --unprivileged 1 \
+    --features nesting=1 \
+    --rootfs ${STORAGE}:4 >/dev/null
+msg_ok "Created LXC Container"
+
+# 5. Start the container
+msg_info "Starting LXC Container"
+pct start $CTID
+msg_ok "Started LXC Container"
+
+msg_info "Waiting for network"
+IP=""
+for i in {1..20}; do
+    sleep 2
+    IP=$(pct exec $CTID -- ip -4 addr show eth0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1 || true)
+    if [ -n "$IP" ]; then
+        break
+    fi
+done
+
+if [ -z "$IP" ]; then
+    msg_error "Failed to get IP address from DHCP."
+    exit 1
+fi
+msg_ok "Network ready (IP: $IP)"
+
+# 6. Install Python and dependencies inside the container
+msg_info "Installing Dependencies"
+pct exec $CTID -- bash -c "apt-get update >/dev/null && apt-get install -y --no-install-recommends git python3 python3-pip python3-venv >/dev/null"
+msg_ok "Installed Dependencies"
+
+# 7. Setup fronius2vim
+msg_info "Setting up fronius2vim"
+pct exec $CTID -- bash -c "git clone https://github.com/kobius77/fronius2vim.git /opt/fronius2vim >/dev/null 2>&1"
+pct exec $CTID -- bash -c "cd /opt/fronius2vim && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt >/dev/null 2>&1"
 msg_ok "Set up fronius2vim"
 
-msg_info "Creating Service"
-cat <<EOF >/etc/systemd/system/fronius2vim.service
+# 8. Create Service
+msg_info "Creating Systemd Service"
+pct exec $CTID -- bash -c 'cat <<EOF >/etc/systemd/system/fronius2vim.service
 [Unit]
 Description=fronius2vim - Fronius to VictoriaMetrics Collector
 After=network.target
@@ -113,30 +150,14 @@ RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF'
 
-systemctl daemon-reload
-systemctl enable fronius2vim.service
-msg_ok "Created Service"
+pct exec $CTID -- bash -c "systemctl daemon-reload && systemctl enable --now fronius2vim.service >/dev/null 2>&1"
+msg_ok "Started Systemd Service"
 
-msg_info "Starting fronius2vim"
-systemctl start fronius2vim.service
-sleep 2
-if systemctl is-active --quiet fronius2vim.service; then
-  msg_ok "fronius2vim is running"
-else
-  msg_error "fronius2vim failed to start"
-  journalctl -u fronius2vim --no-pager -n 10
-  exit 1
-fi
-
-motd_ssh
-customize
-
-msg_ok "Completed successfully!\n"
-echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW} Access it using the following URL:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:8080${CL}"
-echo -e "${INFO}${YW} Configuration:${CL}"
-echo -e "${TAB}Edit /etc/systemd/system/fronius2vim.service to change settings"
-echo -e "${TAB}Then run: systemctl daemon-reload && systemctl restart fronius2vim"
+echo -e "\n${GN}Successfully created fronius2vim LXC!${CL}"
+echo -e "${YW}Dashboard is accessible at:${CL} ${BGN}http://${IP}:8080${CL}\n"
+echo -e "${BL}To configure environment variables (Fronius IP, etc.):${CL}"
+echo -e "1. Run: ${YW}pct enter $CTID${CL}"
+echo -e "2. Edit: ${YW}nano /etc/systemd/system/fronius2vim.service${CL}"
+echo -e "3. Apply: ${YW}systemctl daemon-reload && systemctl restart fronius2vim${CL}\n"
