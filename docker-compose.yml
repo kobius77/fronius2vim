@@ -15,6 +15,26 @@ services:
       - LOG_LEVEL=INFO
     networks:
       - fronius2vim-net
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=60
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_STOPPED=true
+      - WATCHTOWER_REVIVE_STOPPED=false
+      - WATCHTOWER_ROLLING_RESTART=true
+      - REPO_USER=${GITHUB_USERNAME}
+      - REPO_PASS=${GITHUB_TOKEN}
+    command: --interval 60 --label-enable
+    networks:
+      - fronius2vim-net
 
 networks:
   fronius2vim-net:

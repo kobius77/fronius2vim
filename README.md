@@ -8,6 +8,7 @@ A Python-based tool that reads data from a Fronius PV inverter and writes it to 
 - **VictoriaMetrics integration**: Native Prometheus protocol support
 - **Web dashboard**: Real-time WebSocket updates with dark theme
 - **Docker support**: Easy deployment with docker-compose
+- **Automatic updates**: Watchtower auto-redeploys on new commits
 
 ## Metrics Collected
 
@@ -34,6 +35,22 @@ docker-compose up -d
 ```
 
 Access the dashboard at http://localhost:8080
+
+### Automatic Updates (Optional)
+
+The docker-compose includes **Watchtower** for automatic redeployment when new images are published:
+
+```bash
+# Create .env file with GitHub credentials
+cp .env.example .env
+# Edit .env with your GitHub username and Personal Access Token
+nano .env
+
+# Start services (includes watchtower)
+docker-compose up -d
+```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 
 ### Environment Variables
 

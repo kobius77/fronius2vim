@@ -1,73 +1,113 @@
-# Automatic Redeployment Setup
+# Automatic Redeployment with Watchtower
 
-This project automatically builds and deploys Docker images on every commit to the main branch.
+This project uses **Watchtower** to automatically redeploy when new Docker images are pushed to GitHub Container Registry.
 
 ## How It Works
 
-1. **GitHub Actions** builds the Docker image and pushes it to GitHub Container Registry (ghcr.io)
-2. **SSH Deployment** automatically redeploys on your server
-3. **Docker Compose** pulls the latest image and restarts the container
+1. **GitHub Actions** builds the Docker image on every commit to `main`
+2. **GitHub Container Registry (ghcr.io)** stores the built image
+3. **Watchtower** (running on your server) polls every 60 seconds for new images
+4. When a new image is detected, Watchtower automatically pulls and restarts the container
 
 ## Setup Instructions
 
-### 1. Configure GitHub Secrets
+### 1. Create GitHub Personal Access Token
 
-Go to your repository Settings → Secrets and variables → Actions, and add these secrets:
+1. Go to https://github.com/settings/tokens
+2. Click "Generate new token (classic)"
+3. Give it a name like "Watchtower Docker Pull"
+4. Select scope: **`read:packages`**
+5. Click "Generate token"
+6. **Copy the token immediately** (you won't see it again!)
 
-- `SSH_HOST`: Your server's IP address (e.g., `172.20.204.26`)
-- `SSH_USER`: Your SSH username (e.g., `root`)
-- `SSH_PRIVATE_KEY`: Your SSH private key (generate with `ssh-keygen -t ed25519 -a 200 -C "github-actions"`)
+### 2. Configure Environment Variables on Your Server
 
-### 2. Set up SSH Key on Your Server
-
-On your server, add the public key to `~/.ssh/authorized_keys`:
-
-```bash
-# Copy the public key content and add it to authorized_keys
-echo "ssh-ed25519 AAAAC3... github-actions" >> ~/.ssh/authorized_keys
-```
-
-### 3. Ensure Docker Compose File Exists on Server
-
-Your server should have the repository cloned with the docker-compose.yml:
-
-```bash
-cd ~
-git clone https://github.com/kobius77/fronius2vim.git
-```
-
-### 4. Test the Connection
-
-The GitHub Action will automatically run on your next commit. You can also trigger it manually from the Actions tab.
-
-## Alternative: Watchtower (No SSH Required)
-
-If you prefer not to use SSH from GitHub Actions, you can use [Watchtower](https://containrrr.dev/watchtower/) on your server:
-
-```yaml
-# Add to your docker-compose.yml on the server
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - WATCHTOWER_POLL_INTERVAL=60
-      - WATCHTOWER_CLEANUP=true
-      - REPO_USER=${GITHUB_USERNAME}
-      - REPO_PASS=${GITHUB_TOKEN}
-    command: --interval 60 fronius2vim
-```
-
-This requires a GitHub Personal Access Token with `read:packages` scope.
-
-## Manual Deployment (Fallback)
-
-If automatic deployment fails, you can always deploy manually:
+On your remote server:
 
 ```bash
 cd ~/fronius2vim
-git pull
+
+# Create .env file
+cp .env.example .env
+
+# Edit with your credentials
+nano .env
+```
+
+Fill in:
+```env
+GITHUB_USERNAME=your-github-username
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+### 3. Start the Services
+
+```bash
+# Pull and start both fronius2vim and watchtower
+docker compose up -d
+
+# Verify both containers are running
+docker compose ps
+
+# Check watchtower logs to confirm it's monitoring
+docker logs -f watchtower
+```
+
+You should see output like:
+```
+time="..." level=info msg="Found new ghcr.io/kobius77/fronius2vim:latest image"
+time="..." level=info msg"Stopping /fronius2vim (xxxxxxxx) with SIGTERM"
+time="..." level=info msg"Creating /fronius2vim"
+```
+
+### 4. Test Automatic Deployment
+
+Make any commit to the `main` branch and push to GitHub. Within 1-2 minutes, Watchtower should detect the new image and redeploy automatically.
+
+## How to Monitor
+
+```bash
+# Watch watchtower logs in real-time
+docker logs -f watchtower
+
+# Check if new image was pulled
+docker images | grep fronius2vim
+
+# See container status
+docker compose ps
+```
+
+## Troubleshooting
+
+**Problem**: Watchtower can't pull the image (authentication error)
+**Solution**: Check your `.env` file has correct GITHUB_USERNAME and GITHUB_TOKEN
+
+**Problem**: No new deployments on commit
+**Solution**: 
+1. Check GitHub Actions completed successfully: https://github.com/kobius77/fronius2vim/actions
+2. Verify the image was pushed: https://github.com/kobius77/fronius2vim/pkgs/container/fronius2vim
+3. Check watchtower logs: `docker logs watchtower`
+
+**Problem**: Watchtower not detecting updates
+**Solution**: Check that the container has the label:
+```bash
+docker inspect fronius2vim | grep -A 5 Labels
+```
+Should show: `"com.centurylinklabs.watchtower.enable": "true"`
+
+## Security Notes
+
+- The GitHub token only needs `read:packages` scope (cannot push code or access private repos)
+- Token is stored only on your server in the `.env` file (never committed to git)
+- Watchtower only has access to Docker socket, not your full system
+- No inbound SSH access required from GitHub
+
+## Manual Deployment (Fallback)
+
+If Watchtower fails, deploy manually:
+
+```bash
+cd ~/fronius2vim
 docker compose pull
 docker compose up -d
 ```
