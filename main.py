@@ -513,12 +513,16 @@ async def get_history():
                     previous_wh = float(values[i - 1][1])
                     kwh_generated = (current_wh - previous_wh) / 1000
 
-                    intervals.append(
-                        {
-                            "time": datetime.fromtimestamp(timestamp).strftime("%H:%M"),
-                            "kwh": round(kwh_generated, 3),
-                        }
-                    )
+                    # Skip negative values (inverter counter reset at midnight)
+                    if kwh_generated >= 0:
+                        intervals.append(
+                            {
+                                "time": datetime.fromtimestamp(timestamp).strftime(
+                                    "%H:%M"
+                                ),
+                                "kwh": round(kwh_generated, 3),
+                            }
+                        )
 
                 return {"intervals": intervals}
 
