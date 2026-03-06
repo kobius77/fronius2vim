@@ -335,7 +335,7 @@ HTML_DASHBOARD = """
                         backgroundColor: 'rgba(255, 206, 86, 0.1)',
                         borderWidth: 2,
                         tension: 0.4,
-                        pointRadius: 2,
+                        pointRadius: 0,
                         yAxisID: 'y1'
                     }
                 ]
