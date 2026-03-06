@@ -254,7 +254,20 @@ HTML_DASHBOARD = """
         }
         .connected { color: #4ecca3; }
         .disconnected { color: #e74c3c; }
+        .chart-container {
+            background: #16213e;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 30px;
+        }
+        .chart-title {
+            color: #4ecca3;
+            text-align: center;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <h1>☀️ fronius2vim Dashboard</h1>
@@ -291,7 +304,70 @@ HTML_DASHBOARD = """
     
     <div class="timestamp" id="timestamp">--</div>
 
+    <div class="chart-container">
+        <div class="chart-title">⚡ Energy Generation Today (kWh per 15min)</div>
+        <canvas id="energyChart"></canvas>
+    </div>
+
     <script>
+        let ws = null;
+        
+        // Chart.js setup for historical data
+        const ctx = document.getElementById('energyChart').getContext('2d');
+        const energyChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'kWh Generated',
+                    data: [],
+                    backgroundColor: 'rgba(78, 204, 163, 0.7)',
+                    borderColor: 'rgba(78, 204, 163, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: { color: '#888' }
+                    },
+                    x: {
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: { color: '#888', maxRotation: 45 }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        labels: { color: '#eee' }
+                    }
+                }
+            }
+        });
+
+        // Fetch historical data
+        async function fetchHistory() {
+            try {
+                const response = await fetch('/api/history');
+                const data = await response.json();
+                
+                if (data.intervals && data.intervals.length > 0) {
+                    energyChart.data.labels = data.intervals.map(i => i.time);
+                    energyChart.data.datasets[0].data = data.intervals.map(i => i.kwh);
+                    energyChart.update();
+                }
+            } catch (error) {
+                console.error('Failed to fetch history:', error);
+            }
+        }
+
+        // Fetch history on load and every 5 minutes
+        fetchHistory();
+        setInterval(fetchHistory, 300000);
+
         let ws = null;
         
         function connect() {
@@ -355,6 +431,56 @@ async def dashboard():
 async def get_data():
     """REST API endpoint for current data"""
     return latest_data
+
+
+@app.get("/api/history")
+async def get_history():
+    """Query VictoriaMetrics for today's energy data per 15min intervals"""
+    try:
+        # Calculate today's start timestamp (midnight)
+        now = datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_timestamp = int(start_of_day.timestamp())
+
+        # Query VictoriaMetrics for daily energy data today
+        query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
+        params = {
+            "query": "fronius_daily_energy_watthours",
+            "start": start_timestamp,
+            "end": int(now.timestamp()),
+            "step": "15m",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(query_url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("status") == "success" and data.get("data", {}).get("result"):
+                result = data["data"]["result"][0]
+                values = result.get("values", [])
+
+                # Calculate kWh per 15min interval
+                intervals = []
+                for i in range(1, len(values)):
+                    timestamp = int(values[i][0])
+                    current_wh = float(values[i][1])
+                    previous_wh = float(values[i - 1][1])
+                    kwh_generated = (current_wh - previous_wh) / 1000
+
+                    intervals.append(
+                        {
+                            "time": datetime.fromtimestamp(timestamp).strftime("%H:%M"),
+                            "kwh": round(kwh_generated, 3),
+                        }
+                    )
+
+                return {"intervals": intervals}
+
+        return {"intervals": []}
+    except Exception as e:
+        logger.error(f"Failed to fetch history: {e}")
+        return {"intervals": [], "error": str(e)}
 
 
 @app.websocket("/ws")
