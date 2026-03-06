@@ -278,11 +278,11 @@ HTML_DASHBOARD = """
     <div class="metrics">
         <div class="metric-card">
             <div class="metric-value" id="power">--</div>
-            <div class="metric-label">Current Power (W)</div>
+            <div class="metric-label">Current Power (kW)</div>
         </div>
         <div class="metric-card">
             <div class="metric-value" id="daily_energy">--</div>
-            <div class="metric-label">Daily Energy (Wh)</div>
+            <div class="metric-label">Daily Energy (kWh)</div>
         </div>
         <div class="metric-card">
             <div class="metric-value" id="ac_voltage">--</div>
@@ -328,7 +328,7 @@ HTML_DASHBOARD = """
                         yAxisID: 'y'
                     },
                     {
-                        label: 'Power (W) - line',
+                        label: 'Power (kW) - line',
                         data: [],
                         type: 'line',
                         borderColor: 'rgba(255, 206, 86, 1)',
@@ -366,7 +366,7 @@ HTML_DASHBOARD = """
                         ticks: { color: '#ffce56' },
                         title: {
                             display: true,
-                            text: 'Watts',
+                            text: 'kW',
                             color: '#ffce56'
                         }
                     },
@@ -400,9 +400,9 @@ HTML_DASHBOARD = """
                     combinedChart.data.datasets[0].data = historyData.intervals.map(i => i.kwh);
                 }
                 
-                // Add power data
+                // Add power data (convert to kW)
                 if (powerData.points && powerData.points.length > 0) {
-                    combinedChart.data.datasets[1].data = powerData.points.map(p => p.power);
+                    combinedChart.data.datasets[1].data = powerData.points.map(p => p.power / 1000);
                 }
                 
                 combinedChart.update();
@@ -426,10 +426,10 @@ HTML_DASHBOARD = """
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 if (data.power !== undefined) {
-                    document.getElementById('power').textContent = data.power.toLocaleString();
+                    document.getElementById('power').textContent = (data.power / 1000).toFixed(2);
                 }
                 if (data.daily_energy !== undefined) {
-                    document.getElementById('daily_energy').textContent = data.daily_energy.toLocaleString();
+                    document.getElementById('daily_energy').textContent = (data.daily_energy / 1000).toFixed(2);
                 }
                 if (data.ac_voltage !== undefined) {
                     document.getElementById('ac_voltage').textContent = data.ac_voltage.toFixed(1);
