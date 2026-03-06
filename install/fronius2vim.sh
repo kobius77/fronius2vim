@@ -68,9 +68,14 @@ $STD apt-get install -y git python3-pip python3-venv
 msg_ok "Installed Dependencies"
 
 msg_info "Setting up fronius2vim"
-mkdir -p /opt/fronius2vim
-cd /opt/fronius2vim
-git clone https://github.com/kobius77/fronius2vim.git . 2>/dev/null || git pull
+if [ -d "/opt/fronius2vim/.git" ]; then
+  cd /opt/fronius2vim
+  git pull
+else
+  rm -rf /opt/fronius2vim
+  git clone https://github.com/kobius77/fronius2vim.git /opt/fronius2vim
+  cd /opt/fronius2vim
+fi
 
 python3 -m venv venv
 source venv/bin/activate
@@ -104,8 +109,19 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now fronius2vim.service
+systemctl enable fronius2vim.service
 msg_ok "Created Service"
+
+msg_info "Starting fronius2vim"
+systemctl start fronius2vim.service
+sleep 2
+if systemctl is-active --quiet fronius2vim.service; then
+  msg_ok "fronius2vim is running"
+else
+  msg_error "fronius2vim failed to start"
+  journalctl -u fronius2vim --no-pager -n 10
+  exit 1
+fi
 
 motd_ssh
 customize
