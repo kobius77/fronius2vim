@@ -272,7 +272,7 @@ HTML_DASHBOARD = """
 <body>
     <h1>☀️ fronius2vim Dashboard</h1>
     <div class="status">
-        Status: <span id="status" class="disconnected">Connecting...</span>
+        Inverter: <span id="status" class="disconnected">Connecting...</span>
     </div>
     
     <div class="metrics">
