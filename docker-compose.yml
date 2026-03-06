@@ -19,7 +19,7 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
 
   watchtower:
-    image: containrrr/watchtower:1.5.3
+    image: nickfedor/watchtower
     container_name: watchtower
     restart: unless-stopped
     volumes:
