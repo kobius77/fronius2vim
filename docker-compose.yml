@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   fronius2vim:
-    build: .
+    image: ghcr.io/kobius77/fronius2vim:latest
     container_name: fronius2vim
+    pull_policy: always
     restart: unless-stopped
     ports:
       - "8080:8080"
