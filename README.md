@@ -8,7 +8,6 @@ A Python-based tool that reads data from a Fronius PV inverter and writes it to 
 - **VictoriaMetrics integration**: Native Prometheus protocol support
 - **Web dashboard**: Real-time WebSocket updates with dark theme
 - **Docker support**: Easy deployment with docker-compose
-- **Proxmox helper script**: One-command installation on Proxmox VE
 
 ## Metrics Collected
 
@@ -26,7 +25,7 @@ A Python-based tool that reads data from a Fronius PV inverter and writes it to 
 
 ## Quick Start
 
-### Docker Compose
+### Docker Compose (Recommended)
 
 ```bash
 git clone https://github.com/kobius77/fronius2vim
@@ -46,23 +45,6 @@ Access the dashboard at http://localhost:8080
 | `ENERGY_INTERVAL` | `900` | Energy data poll interval (seconds) |
 | `WEB_PORT` | `8080` | Web UI port |
 | `LOG_LEVEL` | `INFO` | Logging level |
-
-### Proxmox Installation (Recommended)
-
-One-command automatic installation on Proxmox VE:
-
-```bash
-bash -c "$(wget -qLO - https://raw.githubusercontent.com/kobius77/fronius2vim/main/install/fronius2vim.sh)"
-```
-
-This will:
-- Create a Debian 12 LXC container
-- Install Python and dependencies
-- Clone and configure fronius2vim
-- Start the service automatically
-- No Docker required!
-
-Access the dashboard at `http://<container-ip>:8080`
 
 ## API Endpoints
 
