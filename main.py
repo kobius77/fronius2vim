@@ -684,11 +684,16 @@ async def get_7day_history():
             data = response.json()
 
             days_dict = {}  # Use dict to deduplicate by date
+            raw_result_count = 0
+            raw_value_count = 0
 
             if data.get("status") == "success" and data.get("data", {}).get("result"):
+                results = data["data"]["result"]
+                raw_result_count = len(results)
                 # Process all series (handles both "symo" and "system" labels)
-                for result in data["data"]["result"]:
+                for result in results:
                     values = result.get("values", [])
+                    raw_value_count += len(values)
                     for value in values:
                         timestamp = int(value[0])
                         wh = float(value[1])
@@ -705,9 +710,23 @@ async def get_7day_history():
 
                 # Convert to sorted list
                 days = [{"date": d, "kwh": round(v, 2)} for d, v in days_dict.items()]
-                return {"days": days}
+                return {
+                    "days": days,
+                    "debug": {
+                        "results": raw_result_count,
+                        "values": raw_value_count,
+                        "start": start_timestamp,
+                        "end": end_timestamp,
+                    },
+                }
 
-        return {"days": []}
+        return {
+            "days": [],
+            "debug": {
+                "status": data.get("status"),
+                "has_result": bool(data.get("data", {}).get("result")),
+            },
+        }
     except Exception as e:
         logger.error(f"Failed to fetch 7-day history: {e}")
         return {"days": [], "error": str(e)}
