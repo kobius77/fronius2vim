@@ -676,13 +676,13 @@ async def get_7day_history():
                 }
             )
 
-        # Query all available data (don't filter by start time to catch all series)
+        # Query data at 15m intervals and find daily max (counters reset at midnight)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "fronius_daily_energy_watthours",
             "start": days_list[0]["start_ts"],
             "end": int(now.timestamp()),
-            "step": "1d",
+            "step": "15m",
         }
 
         async with httpx.AsyncClient() as client:
@@ -692,44 +692,32 @@ async def get_7day_history():
 
             # Collect all values by date
             values_by_date = {}
-            raw_values = []
             if data.get("status") == "success" and data.get("data", {}).get("result"):
                 for result in data["data"]["result"]:
-                    for value in result.get("values", [])[
-                        :3
-                    ]:  # Get first 3 values for debug
-                        raw_values.append(value)
                     for value in result.get("values", []):
                         timestamp = int(value[0])
                         wh = float(value[1])
                         kwh = wh / 1000
 
-                        if kwh > 1:  # Skip near-zero values
-                            day_label = datetime.fromtimestamp(timestamp).strftime(
-                                "%a %d"
-                            )
-                            # Keep highest value for each day
-                            if (
-                                day_label not in values_by_date
-                                or kwh > values_by_date[day_label]
-                            ):
-                                values_by_date[day_label] = kwh
+                        # Find max for each day (date in YYYY-MM-DD format for grouping)
+                        day_key = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+                        day_label = datetime.fromtimestamp(timestamp).strftime("%a %d")
+                        if (
+                            day_key not in values_by_date
+                            or kwh > values_by_date[day_key]["kwh"]
+                        ):
+                            values_by_date[day_key] = {"kwh": kwh, "label": day_label}
 
                 # Fill in the days list with actual values
                 for day in days_list:
-                    if day["date"] in values_by_date:
-                        day["kwh"] = round(values_by_date[day["date"]], 2)
+                    for day_data in values_by_date.values():
+                        if day_data["label"] == day["date"]:
+                            day["kwh"] = round(day_data["kwh"], 2)
+                            break
 
             # Return clean format without internal fields
             return {
                 "days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list],
-                "debug": {
-                    "values_found": values_by_date,
-                    "status": data.get("status"),
-                    "has_result": bool(data.get("data", {}).get("result")),
-                    "result_count": len(data.get("data", {}).get("result", [])),
-                    "raw_samples": raw_values,
-                },
             }
 
     except Exception as e:
