@@ -718,7 +718,12 @@ async def get_7day_history():
             # Return clean format without internal fields
             return {
                 "days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list],
-                "debug": {"values_found": values_by_date},
+                "debug": {
+                    "values_found": values_by_date,
+                    "status": data.get("status"),
+                    "has_result": bool(data.get("data", {}).get("result")),
+                    "result_count": len(data.get("data", {}).get("result", [])),
+                },
             }
 
     except Exception as e:
