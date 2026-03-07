@@ -374,7 +374,7 @@ HTML_DASHBOARD = """
                         display: true,
                         position: 'right',
                         beginAtZero: true,
-                        max: 25,
+                        max: 35,
                         grid: { display: false },
                         ticks: { color: '#ffce56' },
                         title: {
