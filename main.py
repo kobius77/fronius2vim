@@ -7,7 +7,7 @@ Polls Fronius Solar API and writes metrics to VictoriaMetrics
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 import httpx
@@ -191,7 +191,7 @@ async def realtime_collector(
                         "dc_voltage": data["dc_voltage"],
                         "ac_current": data["ac_current"],
                         "dc_current": data["dc_current"],
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
                 )
                 logger.info(f"Realtime data: Power={data['power']}W")
@@ -319,6 +319,11 @@ HTML_DASHBOARD = """
         <canvas id="combinedChart"></canvas>
     </div>
 
+    <div class="chart-container">
+        <div class="chart-title">📊 Last 7 Days Energy Production</div>
+        <canvas id="sevenDayChart"></canvas>
+    </div>
+
     <script>
         let ws = null;
         
@@ -427,7 +432,67 @@ HTML_DASHBOARD = """
         // Fetch data on load and every 5 minutes
         fetchCombinedData();
         setInterval(fetchCombinedData, 300000);
-        
+
+        // 7-day chart setup
+        const sevenDayCtx = document.getElementById('sevenDayChart').getContext('2d');
+        const sevenDayChart = new Chart(sevenDayCtx, {
+            type: 'bar',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Energy (kWh)',
+                    data: [],
+                    backgroundColor: 'rgba(78, 204, 163, 0.7)',
+                    borderColor: 'rgba(78, 204, 163, 1)',
+                    borderWidth: 1,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: { color: '#888' },
+                        title: {
+                            display: true,
+                            text: 'kWh',
+                            color: '#4ecca3'
+                        }
+                    },
+                    x: {
+                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                        ticks: { color: '#888' }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                }
+            }
+        });
+
+        async function fetchSevenDayData() {
+            try {
+                const response = await fetch('/api/history/7days');
+                const data = await response.json();
+
+                if (data.days && data.days.length > 0) {
+                    sevenDayChart.data.labels = data.days.map(d => d.date);
+                    sevenDayChart.data.datasets[0].data = data.days.map(d => d.kwh);
+                    sevenDayChart.update();
+                }
+            } catch (error) {
+                console.error('Failed to fetch 7-day data:', error);
+            }
+        }
+
+        // Fetch 7-day data on load and every hour
+        fetchSevenDayData();
+        setInterval(fetchSevenDayData, 3600000);
+
         function connect() {
             ws = new WebSocket(`ws://${window.location.host}/ws`);
             
@@ -589,6 +654,62 @@ async def get_power():
     except Exception as e:
         logger.error(f"Failed to fetch power: {e}")
         return {"points": [], "error": str(e)}
+
+
+@app.get("/api/history/7days")
+async def get_7day_history():
+    """Query VictoriaMetrics for daily energy production over last 7 days"""
+    try:
+        now = datetime.now()
+        # Calculate 7 days ago at midnight
+        seven_days_ago = (now - timedelta(days=7)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        start_timestamp = int(seven_days_ago.timestamp())
+        end_timestamp = int(now.timestamp())
+
+        # Query VictoriaMetrics for daily energy data
+        query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
+        params = {
+            "query": "fronius_daily_energy_watthours",
+            "start": start_timestamp,
+            "end": end_timestamp,
+            "step": "1d",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(query_url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("status") == "success" and data.get("data", {}).get("result"):
+                result = data["data"]["result"][0]
+                values = result.get("values", [])
+
+                # Process daily totals
+                days = []
+                for i in range(1, len(values)):
+                    timestamp = int(values[i][0])
+                    current_wh = float(values[i][1])
+                    previous_wh = float(values[i - 1][1])
+                    kwh_generated = (current_wh - previous_wh) / 1000
+
+                    # Skip negative values (counter resets)
+                    if kwh_generated >= 0:
+                        day_label = datetime.fromtimestamp(timestamp).strftime("%a %d")
+                        days.append(
+                            {
+                                "date": day_label,
+                                "kwh": round(kwh_generated, 2),
+                            }
+                        )
+
+                return {"days": days}
+
+        return {"days": []}
+    except Exception as e:
+        logger.error(f"Failed to fetch 7-day history: {e}")
+        return {"days": [], "error": str(e)}
 
 
 @app.websocket("/ws")
