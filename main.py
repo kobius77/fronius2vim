@@ -692,8 +692,13 @@ async def get_7day_history():
 
             # Collect all values by date
             values_by_date = {}
+            raw_values = []
             if data.get("status") == "success" and data.get("data", {}).get("result"):
                 for result in data["data"]["result"]:
+                    for value in result.get("values", [])[
+                        :3
+                    ]:  # Get first 3 values for debug
+                        raw_values.append(value)
                     for value in result.get("values", []):
                         timestamp = int(value[0])
                         wh = float(value[1])
@@ -723,6 +728,7 @@ async def get_7day_history():
                     "status": data.get("status"),
                     "has_result": bool(data.get("data", {}).get("result")),
                     "result_count": len(data.get("data", {}).get("result", [])),
+                    "raw_samples": raw_values,
                 },
             }
 
