@@ -661,20 +661,27 @@ async def get_7day_history():
     """Query VictoriaMetrics for daily energy production over last 7 days"""
     try:
         now = datetime.now()
-        # Calculate 7 days ago at midnight
-        seven_days_ago = (now - timedelta(days=7)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        start_timestamp = int(seven_days_ago.timestamp())
-        end_timestamp = int(now.timestamp())
+        # Build list of last 7 days
+        days_list = []
+        for i in range(6, -1, -1):
+            day_date = now - timedelta(days=i)
+            day_start = day_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_label = day_start.strftime("%a %d")
+            days_list.append(
+                {
+                    "date": day_label,
+                    "kwh": 0.0,
+                    "start_ts": int(day_start.timestamp()),
+                    "end_ts": int((day_start + timedelta(days=1)).timestamp()),
+                }
+            )
 
-        # Query VictoriaMetrics for daily energy data
-        # Get raw values - with step=1d we get one sample per day (close to daily total)
+        # Query all available data (don't filter by start time to catch all series)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "fronius_daily_energy_watthours",
-            "start": start_timestamp,
-            "end": end_timestamp,
+            "start": days_list[0]["start_ts"],
+            "end": int(now.timestamp()),
             "step": "1d",
         }
 
@@ -683,50 +690,34 @@ async def get_7day_history():
             response.raise_for_status()
             data = response.json()
 
-            days_dict = {}  # Use dict to deduplicate by date
-            raw_result_count = 0
-            raw_value_count = 0
-
             if data.get("status") == "success" and data.get("data", {}).get("result"):
-                results = data["data"]["result"]
-                raw_result_count = len(results)
-                # Process all series (handles both "symo" and "system" labels)
-                for result in results:
-                    values = result.get("values", [])
-                    raw_value_count += len(values)
-                    for value in values:
+                # Collect all values by date
+                values_by_date = {}
+                for result in data["data"]["result"]:
+                    for value in result.get("values", []):
                         timestamp = int(value[0])
                         wh = float(value[1])
                         kwh = wh / 1000
 
-                        # Only include positive values
-                        if kwh > 1:  # Filter out near-zero values (midnight resets)
+                        if kwh > 1:  # Skip near-zero values
                             day_label = datetime.fromtimestamp(timestamp).strftime(
                                 "%a %d"
                             )
-                            # Keep the higher value if duplicate dates exist
-                            if day_label not in days_dict or kwh > days_dict[day_label]:
-                                days_dict[day_label] = kwh
+                            # Keep highest value for each day
+                            if (
+                                day_label not in values_by_date
+                                or kwh > values_by_date[day_label]
+                            ):
+                                values_by_date[day_label] = kwh
 
-                # Convert to sorted list
-                days = [{"date": d, "kwh": round(v, 2)} for d, v in days_dict.items()]
-                return {
-                    "days": days,
-                    "debug": {
-                        "results": raw_result_count,
-                        "values": raw_value_count,
-                        "start": start_timestamp,
-                        "end": end_timestamp,
-                    },
-                }
+                # Fill in the days list with actual values
+                for day in days_list:
+                    if day["date"] in values_by_date:
+                        day["kwh"] = round(values_by_date[day["date"]], 2)
 
-        return {
-            "days": [],
-            "debug": {
-                "status": data.get("status"),
-                "has_result": bool(data.get("data", {}).get("result")),
-            },
-        }
+            # Return clean format without internal fields
+            return {"days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list]}
+
     except Exception as e:
         logger.error(f"Failed to fetch 7-day history: {e}")
         return {"days": [], "error": str(e)}
