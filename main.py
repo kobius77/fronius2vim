@@ -669,6 +669,7 @@ async def get_7day_history():
         end_timestamp = int(now.timestamp())
 
         # Query VictoriaMetrics for daily energy data
+        # Get raw values - with step=1d we get one sample per day (close to daily total)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "fronius_daily_energy_watthours",
@@ -682,28 +683,28 @@ async def get_7day_history():
             response.raise_for_status()
             data = response.json()
 
+            days_dict = {}  # Use dict to deduplicate by date
+
             if data.get("status") == "success" and data.get("data", {}).get("result"):
-                result = data["data"]["result"][0]
-                values = result.get("values", [])
+                # Process all series (handles both "symo" and "system" labels)
+                for result in data["data"]["result"]:
+                    values = result.get("values", [])
+                    for value in values:
+                        timestamp = int(value[0])
+                        wh = float(value[1])
+                        kwh = wh / 1000
 
-                # Process daily totals
-                days = []
-                for i in range(1, len(values)):
-                    timestamp = int(values[i][0])
-                    current_wh = float(values[i][1])
-                    previous_wh = float(values[i - 1][1])
-                    kwh_generated = (current_wh - previous_wh) / 1000
+                        # Only include positive values
+                        if kwh > 1:  # Filter out near-zero values (midnight resets)
+                            day_label = datetime.fromtimestamp(timestamp).strftime(
+                                "%a %d"
+                            )
+                            # Keep the higher value if duplicate dates exist
+                            if day_label not in days_dict or kwh > days_dict[day_label]:
+                                days_dict[day_label] = kwh
 
-                    # Skip negative values (counter resets)
-                    if kwh_generated >= 0:
-                        day_label = datetime.fromtimestamp(timestamp).strftime("%a %d")
-                        days.append(
-                            {
-                                "date": day_label,
-                                "kwh": round(kwh_generated, 2),
-                            }
-                        )
-
+                # Convert to sorted list
+                days = [{"date": d, "kwh": round(v, 2)} for d, v in days_dict.items()]
                 return {"days": days}
 
         return {"days": []}
