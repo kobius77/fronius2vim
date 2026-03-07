@@ -690,9 +690,9 @@ async def get_7day_history():
             response.raise_for_status()
             data = response.json()
 
+            # Collect all values by date
+            values_by_date = {}
             if data.get("status") == "success" and data.get("data", {}).get("result"):
-                # Collect all values by date
-                values_by_date = {}
                 for result in data["data"]["result"]:
                     for value in result.get("values", []):
                         timestamp = int(value[0])
@@ -716,7 +716,10 @@ async def get_7day_history():
                         day["kwh"] = round(values_by_date[day["date"]], 2)
 
             # Return clean format without internal fields
-            return {"days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list]}
+            return {
+                "days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list],
+                "debug": {"values_found": values_by_date},
+            }
 
     except Exception as e:
         logger.error(f"Failed to fetch 7-day history: {e}")
