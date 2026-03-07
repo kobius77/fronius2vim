@@ -66,12 +66,17 @@ class FroniusCollector:
 
             body = data.get("Body", {}).get("Data", {})
 
+            # Sum values from all inverters
+            def sum_all_inverters(metric_dict):
+                values = metric_dict.get("Values", {})
+                return sum(float(v) for v in values.values())
+
             return {
-                "power": body.get("PAC", {}).get("Values", {}).get("1", 0),
-                "ac_voltage": body.get("UAC", {}).get("Values", {}).get("1", 0),
-                "dc_voltage": body.get("UDC", {}).get("Values", {}).get("1", 0),
-                "ac_current": body.get("IAC", {}).get("Values", {}).get("1", 0),
-                "dc_current": body.get("IDC", {}).get("Values", {}).get("1", 0),
+                "power": sum_all_inverters(body.get("PAC", {})),
+                "ac_voltage": sum_all_inverters(body.get("UAC", {})),
+                "dc_voltage": sum_all_inverters(body.get("UDC", {})),
+                "ac_current": sum_all_inverters(body.get("IAC", {})),
+                "dc_current": sum_all_inverters(body.get("IDC", {})),
             }
         except Exception as e:
             logger.error(f"Failed to get realtime data: {e}")
@@ -89,10 +94,15 @@ class FroniusCollector:
 
             body = data.get("Body", {}).get("Data", {})
 
+            # Sum values from all inverters
+            def sum_all_inverters(metric_dict):
+                values = metric_dict.get("Values", {})
+                return sum(float(v) for v in values.values())
+
             return {
-                "daily": body.get("DAY_ENERGY", {}).get("Values", {}).get("1", 0),
-                "yearly": body.get("YEAR_ENERGY", {}).get("Values", {}).get("1", 0),
-                "total": body.get("TOTAL_ENERGY", {}).get("Values", {}).get("1", 0),
+                "daily": sum_all_inverters(body.get("DAY_ENERGY", {})),
+                "yearly": sum_all_inverters(body.get("YEAR_ENERGY", {})),
+                "total": sum_all_inverters(body.get("TOTAL_ENERGY", {})),
             }
         except Exception as e:
             logger.error(f"Failed to get energy data: {e}")
@@ -136,31 +146,31 @@ class VictoriaMetricsWriter:
     async def write_realtime_metrics(self, data: Dict):
         """Write real-time metrics"""
         await self.write_metric(
-            "fronius_power_watts", data["power"], {"inverter": "symo"}
+            "fronius_power_watts", data["power"], {"inverter": "system"}
         )
         await self.write_metric(
-            "fronius_ac_voltage_volts", data["ac_voltage"], {"inverter": "symo"}
+            "fronius_ac_voltage_volts", data["ac_voltage"], {"inverter": "system"}
         )
         await self.write_metric(
-            "fronius_dc_voltage_volts", data["dc_voltage"], {"inverter": "symo"}
+            "fronius_dc_voltage_volts", data["dc_voltage"], {"inverter": "system"}
         )
         await self.write_metric(
-            "fronius_ac_current_amperes", data["ac_current"], {"inverter": "symo"}
+            "fronius_ac_current_amperes", data["ac_current"], {"inverter": "system"}
         )
         await self.write_metric(
-            "fronius_dc_current_amperes", data["dc_current"], {"inverter": "symo"}
+            "fronius_dc_current_amperes", data["dc_current"], {"inverter": "system"}
         )
 
     async def write_energy_metrics(self, data: Dict):
         """Write energy counter metrics"""
         await self.write_metric(
-            "fronius_daily_energy_watthours", data["daily"], {"inverter": "symo"}
+            "fronius_daily_energy_watthours", data["daily"], {"inverter": "system"}
         )
         await self.write_metric(
-            "fronius_yearly_energy_watthours", data["yearly"], {"inverter": "symo"}
+            "fronius_yearly_energy_watthours", data["yearly"], {"inverter": "system"}
         )
         await self.write_metric(
-            "fronius_total_energy_watthours", data["total"], {"inverter": "symo"}
+            "fronius_total_energy_watthours", data["total"], {"inverter": "system"}
         )
 
 
