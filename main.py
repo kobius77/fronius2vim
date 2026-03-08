@@ -270,18 +270,7 @@ HTML_DASHBOARD = """
             <div class="metric-label">Daily Energy (kWh)</div>
         </div>
 
-        <div class="metric-card">
-            <div class="metric-value" id="dc_voltage">--</div>
-            <div class="metric-label">DC Voltage (V)</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value" id="ac_current">--</div>
-            <div class="metric-label">AC Current (A)</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value" id="dc_current">--</div>
-            <div class="metric-label">DC Current (A)</div>
-        </div>
+
     </div>
     
     <div class="timestamp" id="timestamp">--</div>
