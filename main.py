@@ -37,12 +37,7 @@ app = FastAPI(title="fronius2vim", version="1.0.0")
 # Latest data cache for WebSocket
 latest_data = {
     "power": 0,
-    "ac_voltage": 0,
-    "dc_voltage": 0,
-    "ac_current": 0,
-    "dc_current": 0,
     "daily_energy": 0,
-    "timestamp": None,
 }
 
 
@@ -55,7 +50,7 @@ class FroniusCollector:
         self.client = httpx.AsyncClient(timeout=10.0)
 
     async def get_realtime_data(self) -> Optional[Dict]:
-        """Get real-time inverter data (PAC, voltages, currents)"""
+        """Get real-time inverter data (PAC power only)"""
         url = f"{self.base_url}/GetInverterRealtimeData.cgi"
         params = {"Scope": "System", "DataCollection": "CumulationInverterData"}
 
@@ -73,10 +68,6 @@ class FroniusCollector:
 
             return {
                 "power": sum_all_inverters(body.get("PAC", {})),
-                "ac_voltage": sum_all_inverters(body.get("UAC", {})),
-                "dc_voltage": sum_all_inverters(body.get("UDC", {})),
-                "ac_current": sum_all_inverters(body.get("IAC", {})),
-                "dc_current": sum_all_inverters(body.get("IDC", {})),
             }
         except Exception as e:
             logger.error(f"Failed to get realtime data: {e}")
@@ -148,18 +139,6 @@ class VictoriaMetricsWriter:
         await self.write_metric(
             "fronius_power_watts", data["power"], {"inverter": "system"}
         )
-        await self.write_metric(
-            "fronius_ac_voltage_volts", data["ac_voltage"], {"inverter": "system"}
-        )
-        await self.write_metric(
-            "fronius_dc_voltage_volts", data["dc_voltage"], {"inverter": "system"}
-        )
-        await self.write_metric(
-            "fronius_ac_current_amperes", data["ac_current"], {"inverter": "system"}
-        )
-        await self.write_metric(
-            "fronius_dc_current_amperes", data["dc_current"], {"inverter": "system"}
-        )
 
     async def write_energy_metrics(self, data: Dict):
         """Write energy counter metrics"""
@@ -187,10 +166,6 @@ async def realtime_collector(
                 latest_data.update(
                     {
                         "power": data["power"],
-                        "ac_voltage": data["ac_voltage"],
-                        "dc_voltage": data["dc_voltage"],
-                        "ac_current": data["ac_current"],
-                        "dc_current": data["dc_current"],
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
                 )
@@ -294,10 +269,7 @@ HTML_DASHBOARD = """
             <div class="metric-value" id="daily_energy">--</div>
             <div class="metric-label">Daily Energy (kWh)</div>
         </div>
-        <div class="metric-card">
-            <div class="metric-value" id="ac_voltage">--</div>
-            <div class="metric-label">AC Voltage (V)</div>
-        </div>
+
         <div class="metric-card">
             <div class="metric-value" id="dc_voltage">--</div>
             <div class="metric-label">DC Voltage (V)</div>
@@ -509,18 +481,7 @@ HTML_DASHBOARD = """
                 if (data.daily_energy !== undefined) {
                     document.getElementById('daily_energy').textContent = (data.daily_energy / 1000).toFixed(2);
                 }
-                if (data.ac_voltage !== undefined) {
-                    document.getElementById('ac_voltage').textContent = data.ac_voltage.toFixed(1);
-                }
-                if (data.dc_voltage !== undefined) {
-                    document.getElementById('dc_voltage').textContent = data.dc_voltage.toFixed(1);
-                }
-                if (data.ac_current !== undefined) {
-                    document.getElementById('ac_current').textContent = data.ac_current.toFixed(2);
-                }
-                if (data.dc_current !== undefined) {
-                    document.getElementById('dc_current').textContent = data.dc_current.toFixed(2);
-                }
+
                 if (data.timestamp) {
                     document.getElementById('timestamp').textContent = 'Last update: ' + data.timestamp;
                 }
