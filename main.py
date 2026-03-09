@@ -418,7 +418,7 @@ HTML_DASHBOARD = """
         }
         
         @keyframes fadeIn {
-            from { opacity: 0; background: rgba(13, 222, 65, 0.1); }
+            from { opacity: 0; background: rgba(11, 166, 49, 0.1); }
             to { opacity: 1; background: transparent; }
         }
         
@@ -511,7 +511,7 @@ HTML_DASHBOARD = """
             </div>
             <div class="legend">
                 <div class="legend-item">
-                    <div class="legend-color" style="background: rgba(13, 222, 65, 0.8);"></div>
+                    <div class="legend-color" style="background: rgba(11, 166, 49, 0.8);"></div>
                     <span>Energy (kWh)</span>
                 </div>
                 <div class="legend-item">
@@ -559,8 +559,8 @@ HTML_DASHBOARD = """
                     {
                         label: 'Energy (kWh)',
                         data: [],
-                        backgroundColor: 'rgba(46, 204, 113, 0.8)',
-                        borderColor: 'rgba(46, 204, 113, 1)',
+                        backgroundColor: 'rgba(11, 166, 49, 0.8)',
+                        borderColor: 'rgba(11, 166, 49, 1)',
                         borderWidth: 0,
                         borderRadius: 3,
                         yAxisID: 'y',
@@ -677,8 +677,8 @@ HTML_DASHBOARD = """
                 datasets: [{
                     label: 'Energy (kWh)',
                     data: [],
-                    backgroundColor: 'rgba(13, 222, 65, 0.8)',
-                    borderColor: 'rgba(13, 222, 65, 1)',
+                    backgroundColor: 'rgba(11, 166, 49, 0.8)',
+                    borderColor: 'rgba(11, 166, 49, 1)',
                     borderWidth: 0,
                     borderRadius: 4,
                 }]
@@ -694,14 +694,14 @@ HTML_DASHBOARD = """
                             drawBorder: false
                         },
                         ticks: { 
-                            color: '#6b7280',
+                            color: '#93949e',
                             font: { size: 11 }
                         }
                     },
                     x: {
                         grid: { display: false },
                         ticks: { 
-                            color: '#6b7280',
+                            color: '#93949e',
                             font: { size: 11 }
                         }
                     }
