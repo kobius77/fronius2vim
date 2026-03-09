@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import FastAPI, WebSocket
@@ -35,7 +35,7 @@ logger = logging.getLogger("fronius2vim")
 app = FastAPI(title="fronius2vim", version="1.0.0")
 
 # Latest data cache for WebSocket
-latest_data = {
+latest_data: Dict[str, Any] = {
     "power": 0,
     "daily_energy": 0,
 }
@@ -163,12 +163,8 @@ async def realtime_collector(
             if data:
                 await writer.write_realtime_metrics(data)
                 # Update cache for WebSocket
-                latest_data.update(
-                    {
-                        "power": data["power"],
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                )
+                latest_data["power"] = data["power"]
+                latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 logger.info(f"Realtime data: Power={data['power']}W")
         except Exception as e:
             logger.error(f"Error in realtime collector: {e}")
@@ -200,95 +196,546 @@ HTML_DASHBOARD = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --evcc-green: #2ecc71;
+            --evcc-green-light: #58d68d;
+            --evcc-dark: #1a1f2e;
+            --evcc-text: #2d3342;
+            --evcc-text-secondary: #6b7280;
+            --evcc-bg: #f3f4f6;
+            --evcc-card: #ffffff;
+            --evcc-border: #e5e7eb;
+            --evcc-yellow: #f1c40f;
+        }
+        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            max-width: 800px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--evcc-bg);
+            color: var(--evcc-text);
+            min-height: 100vh;
+        }
+        
+        /* Top Bar - Light with border like evcc */
+        .top-bar {
+            background: var(--evcc-card);
+            border-bottom: 1px solid var(--evcc-border);
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .site-title {
+            font-size: 1.125rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            color: var(--evcc-text);
+            text-transform: uppercase;
+        }
+        
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+            color: var(--evcc-text-secondary);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+        
+        .status-dot.connected {
+            background: var(--evcc-green);
+        }
+        
+        /* Main Container */
+        .container {
+            max-width: 1200px;
             margin: 0 auto;
-            padding: 20px;
-            background: #1a1a2e;
-            color: #eee;
+            padding: 24px;
         }
-        h1 { color: #4ecca3; text-align: center; }
-        .status { text-align: center; margin: 20px 0; }
-        .metrics {
+        
+        /* Power Bar - Green like evcc energy bar */
+        .power-section {
+            background: var(--evcc-card);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        
+        .power-bar-container {
+            position: relative;
+            height: 48px;
+            background: #e5e7eb;
+            border-radius: 24px;
+            overflow: hidden;
+            margin-bottom: 12px;
+        }
+        
+        .power-bar-fill {
+            height: 100%;
+            background: var(--evcc-green);
+            border-radius: 24px;
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 80px;
+        }
+        
+        .power-bar-text {
+            color: white;
+            font-weight: 600;
+            font-size: 1rem;
+            white-space: nowrap;
+            padding: 0 16px;
+        }
+        
+        .power-icons {
+            display: flex;
+            justify-content: space-between;
+            padding: 0 8px;
+        }
+        
+        .power-icon {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            color: var(--evcc-text-secondary);
+            font-size: 0.75rem;
+        }
+        
+        .power-icon svg {
+            width: 20px;
+            height: 20px;
+        }
+        
+        .power-icon.active {
+            color: var(--evcc-green);
+        }
+        
+        /* Energy Legend */
+        .energy-legend {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid var(--evcc-border);
+        }
+        
+        .legend-left, .legend-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+            color: var(--evcc-text-secondary);
+        }
+        
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+        
+        .legend-dot.self {
+            background: var(--evcc-green);
+        }
+        
+        .legend-dot.export {
+            background: var(--evcc-yellow);
+        }
+        
+        /* Energy Flow Section */
+        .energy-flow {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-top: 30px;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 24px;
         }
-        .metric-card {
-            background: #16213e;
-            border-radius: 10px;
+        
+        @media (max-width: 768px) {
+            .energy-flow {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .flow-card {
+            background: var(--evcc-card);
+            border-radius: 16px;
             padding: 20px;
-            text-align: center;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
-        .metric-value {
-            font-size: 2.5em;
-            font-weight: bold;
-            color: #4ecca3;
+        
+        .flow-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--evcc-border);
         }
-        .metric-label {
-            color: #888;
-            margin-top: 5px;
+        
+        .flow-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--evcc-text);
         }
-        .timestamp {
-            text-align: center;
-            color: #666;
-            margin-top: 20px;
-            font-size: 0.9em;
+        
+        .flow-value {
+            font-size: 1.125rem;
+            font-weight: 700;
+            color: var(--evcc-text);
         }
-        .connected { color: #4ecca3; }
-        .disconnected { color: #e74c3c; }
-        .chart-container {
-            background: #16213e;
-            border-radius: 10px;
+        
+        .flow-items {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        
+        .flow-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            padding: 8px 0;
+        }
+        
+        .flow-item-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        
+        .flow-item-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--evcc-text-secondary);
+            font-size: 0.9375rem;
+        }
+        
+        .flow-item-value-section {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 2px;
+        }
+        
+        .flow-item-value {
+            font-weight: 600;
+            color: var(--evcc-text);
+            font-size: 0.9375rem;
+        }
+        
+        .flow-item-sub {
+            font-size: 0.8125rem;
+            color: var(--evcc-text-secondary);
+        }
+        
+        /* Icons using SVG */
+        .icon {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+        }
+        
+        .icon svg {
+            width: 100%;
+            height: 100%;
+        }
+        
+        /* Chart Cards */
+        .chart-card {
+            background: var(--evcc-card);
+            border-radius: 16px;
             padding: 20px;
-            margin-top: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
+        
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        
         .chart-title {
-            color: #4ecca3;
-            text-align: center;
-            margin-bottom: 15px;
-            font-size: 1.2em;
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--evcc-text);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .timestamp {
+            font-size: 0.8125rem;
+            color: var(--evcc-text-secondary);
+        }
+        
+        /* Legend for charts */
+        .legend {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 16px;
+            padding: 10px 14px;
+            background: #f9fafb;
+            border-radius: 8px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.8125rem;
+            color: var(--evcc-text-secondary);
+        }
+        
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+        
+        /* Footer */
+        .footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            color: var(--evcc-text-secondary);
+            font-size: 0.8125rem;
+            background: var(--evcc-card);
+            border-top: 1px solid var(--evcc-border);
+        }
+        
+        .footer-left {
+            font-weight: 600;
+        }
+        
+        .footer-right {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .solar-badge {
+            color: var(--evcc-green);
+            font-weight: 600;
+        }
+        
+        /* Responsive */
+        @media (max-width: 640px) {
+            .container {
+                padding: 16px;
+            }
+            
+            .power-bar-text {
+                font-size: 0.875rem;
+            }
+            
+            .flow-value {
+                font-size: 1rem;
+            }
+            
+            .footer {
+                flex-direction: column;
+                gap: 8px;
+                text-align: center;
+            }
         }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <h1>☀️ fronius2vim Dashboard</h1>
-    <div class="status">
-        Inverter: <span id="status" class="disconnected">Connecting...</span>
+    <div class="top-bar">
+        <div class="site-title">fronius2vim</div>
+        <div class="status-badge">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Connecting...</span>
+        </div>
     </div>
     
-    <div class="metrics">
-        <div class="metric-card">
-            <div class="metric-value" id="power">--</div>
-            <div class="metric-label">Current Power (kW)</div>
+    <div class="container">
+        <!-- Main Power Display - Green bar like evcc -->
+        <div class="power-section">
+            <div class="power-bar-container">
+                <div class="power-bar-fill" id="powerBar" style="width: 0%;">
+                    <span class="power-bar-text" id="powerDisplay">-- kW</span>
+                </div>
+            </div>
+            <div class="power-icons">
+                <div class="power-icon active">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="5"/>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                    </svg>
+                    <span>In</span>
+                </div>
+                <div class="power-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2"/>
+                        <path d="M9 3v18M15 3v18"/>
+                    </svg>
+                    <span>Battery</span>
+                </div>
+                <div class="power-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="7" width="20" height="14" rx="2"/>
+                        <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+                    </svg>
+                    <span>Loadpoint</span>
+                </div>
+                <div class="power-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                        <polyline points="9 22 9 12 15 12 15 22"/>
+                    </svg>
+                    <span>Home</span>
+                </div>
+                <div class="power-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                        <path d="M2 17l10 5 10-5"/>
+                        <path d="M2 12l10 5 10-5"/>
+                    </svg>
+                    <span>Grid</span>
+                </div>
+            </div>
+            <div class="energy-legend">
+                <div class="legend-left">
+                    <span class="legend-dot self"></span>
+                    <span>Self-consumption</span>
+                </div>
+                <div class="legend-right">
+                    <span>Grid export</span>
+                    <span class="legend-dot export"></span>
+                </div>
+            </div>
         </div>
-        <div class="metric-card">
-            <div class="metric-value" id="daily_energy">--</div>
-            <div class="metric-label">Daily Energy (kWh)</div>
+        
+        <!-- Energy Flow Section (In/Out like evcc) -->
+        <div class="energy-flow">
+            <div class="flow-card">
+                <div class="flow-header">
+                    <span class="flow-title">In</span>
+                    <span class="flow-value" id="powerIn">0 W</span>
+                </div>
+                <div class="flow-items">
+                    <div class="flow-item">
+                        <div class="flow-item-info">
+                            <div class="flow-item-label">
+                                <span class="icon">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="5"/>
+                                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                                    </svg>
+                                </span>
+                                Production
+                            </div>
+                            <div class="flow-item-sub" id="productionSub">0.0 kWh</div>
+                        </div>
+                        <div class="flow-item-value-section">
+                            <span class="flow-item-value" id="productionValue">0 W</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flow-card">
+                <div class="flow-header">
+                    <span class="flow-title">Out</span>
+                    <span class="flow-value" id="powerOut">0 W</span>
+                </div>
+                <div class="flow-items">
+                    <div class="flow-item">
+                        <div class="flow-item-info">
+                            <div class="flow-item-label">
+                                <span class="icon">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                                        <polyline points="9 22 9 12 15 12 15 22"/>
+                                    </svg>
+                                </span>
+                                Consumption
+                            </div>
+                        </div>
+                        <div class="flow-item-value-section">
+                            <span class="flow-item-value" id="consumptionValue">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-
-
+        
+        <!-- Today's Chart -->
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
+                        <rect x="3" y="3" width="18" height="18" rx="2"/>
+                        <path d="M9 3v18M15 3v18"/>
+                    </svg>
+                    Energy Generation Today
+                </div>
+                <span class="timestamp" id="timestamp">--</span>
+            </div>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: rgba(46, 204, 113, 0.8);"></div>
+                    <span>Energy (kWh)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: rgba(52, 152, 219, 1);"></div>
+                    <span>Power (kW)</span>
+                </div>
+            </div>
+            <canvas id="combinedChart"></canvas>
+        </div>
+        
+        <!-- 7 Day Chart -->
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
+                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                        <line x1="16" y1="2" x2="16" y2="6"/>
+                        <line x1="8" y1="2" x2="8" y2="6"/>
+                        <line x1="3" y1="10" x2="21" y2="10"/>
+                    </svg>
+                    Last 7 Days Production
+                </div>
+            </div>
+            <canvas id="sevenDayChart"></canvas>
+        </div>
     </div>
     
-    <div class="timestamp" id="timestamp">--</div>
-
-    <div class="chart-container">
-        <div class="chart-title">⚡ Energy Generation & Power Output Today</div>
-        <canvas id="combinedChart"></canvas>
-    </div>
-
-    <div class="chart-container">
-        <div class="chart-title">📊 Last 7 Days Energy Production</div>
-        <canvas id="sevenDayChart"></canvas>
+    <div class="footer">
+        <div class="footer-left">fronius2vim</div>
+        <div class="footer-right">
+            <span class="solar-badge">☀️ Solar energy</span>
+        </div>
     </div>
 
     <script>
         let ws = null;
+        const MAX_POWER_KW = 35; // Max expected power for bar scaling
         
-        // Chart.js setup for combined chart (bars + line with dual y-axes)
+        // Chart.js setup for combined chart
         const ctx = document.getElementById('combinedChart').getContext('2d');
         const combinedChart = new Chart(ctx, {
             type: 'bar',
@@ -296,23 +743,25 @@ HTML_DASHBOARD = """
                 labels: [],
                 datasets: [
                     {
-                        label: 'kWh Generated (bars)',
+                        label: 'Energy (kWh)',
                         data: [],
-                        backgroundColor: 'rgba(78, 204, 163, 0.7)',
-                        borderColor: 'rgba(78, 204, 163, 1)',
-                        borderWidth: 1,
+                        backgroundColor: 'rgba(46, 204, 113, 0.8)',
+                        borderColor: 'rgba(46, 204, 113, 1)',
+                        borderWidth: 0,
+                        borderRadius: 3,
                         yAxisID: 'y',
                         order: 2
                     },
                     {
-                        label: 'Power (kW) - line',
+                        label: 'Power (kW)',
                         data: [],
                         type: 'line',
-                        borderColor: 'rgba(255, 206, 86, 1)',
-                        backgroundColor: 'rgba(255, 206, 86, 0.1)',
+                        borderColor: 'rgba(52, 152, 219, 1)',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
                         borderWidth: 2,
                         tension: 0.4,
                         pointRadius: 0,
+                        pointHoverRadius: 4,
                         yAxisID: 'y1',
                         order: 1
                     }
@@ -321,18 +770,23 @@ HTML_DASHBOARD = """
             options: {
                 responsive: true,
                 maintainAspectRatio: true,
+                interaction: {
+                    mode: 'index',
+                    intersect: false,
+                },
                 scales: {
                     y: {
                         type: 'linear',
                         display: true,
                         position: 'left',
                         beginAtZero: true,
-                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
-                        ticks: { color: '#888' },
-                        title: {
-                            display: true,
-                            text: 'kWh',
-                            color: '#4ecca3'
+                        grid: { 
+                            color: 'rgba(0, 0, 0, 0.04)',
+                            drawBorder: false
+                        },
+                        ticks: { 
+                            color: '#6b7280',
+                            font: { size: 11 }
                         }
                     },
                     y1: {
@@ -340,23 +794,45 @@ HTML_DASHBOARD = """
                         display: true,
                         position: 'right',
                         beginAtZero: true,
-                        max: 35,
                         grid: { display: false },
-                        ticks: { color: '#ffce56' },
-                        title: {
-                            display: true,
-                            text: 'kW',
-                            color: '#ffce56'
+                        ticks: { 
+                            color: '#3498db',
+                            font: { size: 11 }
                         }
                     },
                     x: {
-                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
-                        ticks: { color: '#888', maxRotation: 45 }
+                        grid: { display: false },
+                        ticks: { 
+                            color: '#6b7280',
+                            font: { size: 11 },
+                            maxRotation: 45,
+                            autoSkip: true,
+                            maxTicksLimit: 12
+                        }
                     }
                 },
                 plugins: {
                     legend: {
-                        labels: { color: '#eee' }
+                        display: false
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(45, 51, 66, 0.95)',
+                        padding: 12,
+                        cornerRadius: 8,
+                        titleFont: { size: 13 },
+                        bodyFont: { size: 12 },
+                        callbacks: {
+                            label: function(context) {
+                                let label = context.dataset.label || '';
+                                if (label) {
+                                    label += ': ';
+                                }
+                                if (context.parsed.y !== null) {
+                                    label += context.parsed.y.toFixed(2);
+                                }
+                                return label;
+                            }
+                        }
                     }
                 }
             }
@@ -373,13 +849,11 @@ HTML_DASHBOARD = """
                 const historyData = await historyRes.json();
                 const powerData = await powerRes.json();
                 
-                // Use energy data as the base (15min intervals)
                 if (historyData.intervals && historyData.intervals.length > 0) {
                     combinedChart.data.labels = historyData.intervals.map(i => i.time);
                     combinedChart.data.datasets[0].data = historyData.intervals.map(i => i.kwh);
                 }
                 
-                // Add power data (convert to kW)
                 if (powerData.points && powerData.points.length > 0) {
                     combinedChart.data.datasets[1].data = powerData.points.map(p => p.power / 1000);
                 }
@@ -390,7 +864,6 @@ HTML_DASHBOARD = """
             }
         }
 
-        // Fetch data on load and every 5 minutes
         fetchCombinedData();
         setInterval(fetchCombinedData, 300000);
 
@@ -403,9 +876,10 @@ HTML_DASHBOARD = """
                 datasets: [{
                     label: 'Energy (kWh)',
                     data: [],
-                    backgroundColor: 'rgba(78, 204, 163, 0.7)',
-                    borderColor: 'rgba(78, 204, 163, 1)',
-                    borderWidth: 1,
+                    backgroundColor: 'rgba(46, 204, 113, 0.8)',
+                    borderColor: 'rgba(46, 204, 113, 1)',
+                    borderWidth: 0,
+                    borderRadius: 4,
                 }]
             },
             options: {
@@ -414,22 +888,36 @@ HTML_DASHBOARD = """
                 scales: {
                     y: {
                         beginAtZero: true,
-                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
-                        ticks: { color: '#888' },
-                        title: {
-                            display: true,
-                            text: 'kWh',
-                            color: '#4ecca3'
+                        grid: { 
+                            color: 'rgba(0, 0, 0, 0.04)',
+                            drawBorder: false
+                        },
+                        ticks: { 
+                            color: '#6b7280',
+                            font: { size: 11 }
                         }
                     },
                     x: {
-                        grid: { color: 'rgba(255, 255, 255, 0.1)' },
-                        ticks: { color: '#888' }
+                        grid: { display: false },
+                        ticks: { 
+                            color: '#6b7280',
+                            font: { size: 11 }
+                        }
                     }
                 },
                 plugins: {
                     legend: {
                         display: false
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(45, 51, 66, 0.95)',
+                        padding: 12,
+                        cornerRadius: 8,
+                        callbacks: {
+                            label: function(context) {
+                                return context.parsed.y.toFixed(2) + ' kWh';
+                            }
+                        }
                     }
                 }
             }
@@ -450,35 +938,50 @@ HTML_DASHBOARD = """
             }
         }
 
-        // Fetch 7-day data on load and every hour
         fetchSevenDayData();
         setInterval(fetchSevenDayData, 3600000);
+
+        function updatePowerBar(powerKw) {
+            const bar = document.getElementById('powerBar');
+            const display = document.getElementById('powerDisplay');
+            
+            // Calculate percentage (max 35kW)
+            const percentage = Math.min((powerKw / MAX_POWER_KW) * 100, 100);
+            bar.style.width = Math.max(percentage, 5) + '%'; // Min 5% for visibility
+            display.textContent = powerKw.toFixed(1) + ' kW';
+        }
 
         function connect() {
             ws = new WebSocket(`ws://${window.location.host}/ws`);
             
             ws.onopen = () => {
-                document.getElementById('status').textContent = 'Connected';
-                document.getElementById('status').className = 'connected';
+                document.getElementById('statusText').textContent = 'Connected';
+                document.getElementById('statusDot').className = 'status-dot connected';
             };
             
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+                
                 if (data.power !== undefined) {
-                    document.getElementById('power').textContent = (data.power / 1000).toFixed(2);
+                    const powerKw = data.power / 1000;
+                    updatePowerBar(powerKw);
+                    document.getElementById('powerIn').textContent = Math.round(data.power) + ' W';
+                    document.getElementById('productionValue').textContent = Math.round(data.power) + ' W';
                 }
+                
                 if (data.daily_energy !== undefined) {
-                    document.getElementById('daily_energy').textContent = (data.daily_energy / 1000).toFixed(2);
+                    const dailyKwh = data.daily_energy / 1000;
+                    document.getElementById('productionSub').textContent = dailyKwh.toFixed(1) + ' kWh';
                 }
 
                 if (data.timestamp) {
-                    document.getElementById('timestamp').textContent = 'Last update: ' + data.timestamp;
+                    document.getElementById('timestamp').textContent = data.timestamp;
                 }
             };
             
             ws.onclose = () => {
-                document.getElementById('status').textContent = 'Disconnected - Retrying...';
-                document.getElementById('status').className = 'disconnected';
+                document.getElementById('statusText').textContent = 'Disconnected - Retrying...';
+                document.getElementById('statusDot').className = 'status-dot';
                 setTimeout(connect, 5000);
             };
             
