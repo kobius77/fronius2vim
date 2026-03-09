@@ -876,13 +876,13 @@ async def get_power():
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         start_timestamp = int(start_of_day.timestamp())
 
-        # Query VictoriaMetrics for power data today (avg over 15min to match energy intervals)
+        # Query VictoriaMetrics for power data today (hourly to match energy)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
-            "query": "avg_over_time(fronius_power_watts[15m])",
+            "query": "avg_over_time(fronius_power_watts[1h])",
             "start": start_timestamp,
             "end": int(now.timestamp()),
-            "step": "15m",
+            "step": "1h",
         }
 
         async with httpx.AsyncClient() as client:
@@ -900,7 +900,7 @@ async def get_power():
                     power = float(value[1])
                     points.append(
                         {
-                            "time": datetime.fromtimestamp(timestamp).strftime("%H:%M"),
+                            "time": datetime.fromtimestamp(timestamp).strftime("%H:00"),
                             "power": round(power, 0),
                         }
                     )
