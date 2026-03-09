@@ -611,7 +611,7 @@ HTML_DASHBOARD = """
                         max: 35,
                         grid: { display: false },
                         ticks: { 
-                            color: '#3498db',
+                            color: '#93949e',
                             font: { size: 11 }
                         }
                     },
@@ -822,13 +822,13 @@ async def get_history():
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         start_timestamp = int(start_of_day.timestamp())
 
-        # Query VictoriaMetrics for daily energy data today
+        # Query VictoriaMetrics for daily energy data today (hourly)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "fronius_daily_energy_watthours",
             "start": start_timestamp,
             "end": int(now.timestamp()),
-            "step": "15m",
+            "step": "1h",
         }
 
         async with httpx.AsyncClient() as client:
@@ -840,7 +840,7 @@ async def get_history():
                 result = data["data"]["result"][0]
                 values = result.get("values", [])
 
-                # Calculate kWh per 15min interval
+                # Calculate kWh per hour interval
                 intervals = []
                 for i in range(1, len(values)):
                     timestamp = int(values[i][0])
@@ -853,9 +853,9 @@ async def get_history():
                         intervals.append(
                             {
                                 "time": datetime.fromtimestamp(timestamp).strftime(
-                                    "%H:%M"
+                                    "%H:00"
                                 ),
-                                "kwh": round(kwh_generated, 3),
+                                "kwh": round(kwh_generated, 2),
                             }
                         )
 
