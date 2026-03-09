@@ -204,14 +204,11 @@ HTML_DASHBOARD = """
         
         :root {
             --evcc-green: #2ecc71;
-            --evcc-green-light: #58d68d;
-            --evcc-dark: #1a1f2e;
             --evcc-text: #2d3342;
             --evcc-text-secondary: #6b7280;
             --evcc-bg: #f3f4f6;
             --evcc-card: #ffffff;
             --evcc-border: #e5e7eb;
-            --evcc-yellow: #f1c40f;
         }
         
         body {
@@ -221,7 +218,7 @@ HTML_DASHBOARD = """
             min-height: 100vh;
         }
         
-        /* Top Bar - Light with border like evcc */
+        /* Top Bar */
         .top-bar {
             background: var(--evcc-card);
             border-bottom: 1px solid var(--evcc-border);
@@ -260,201 +257,52 @@ HTML_DASHBOARD = """
         
         /* Main Container */
         .container {
-            max-width: 1200px;
+            max-width: 900px;
             margin: 0 auto;
             padding: 24px;
         }
         
-        /* Power Bar - Green like evcc energy bar */
-        .power-section {
-            background: var(--evcc-card);
-            border-radius: 16px;
-            padding: 24px;
-            margin-bottom: 24px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        }
-        
-        .power-bar-container {
-            position: relative;
-            height: 48px;
-            background: #e5e7eb;
-            border-radius: 24px;
-            overflow: hidden;
-            margin-bottom: 12px;
-        }
-        
-        .power-bar-fill {
-            height: 100%;
-            background: var(--evcc-green);
-            border-radius: 24px;
-            transition: width 0.5s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-width: 80px;
-        }
-        
-        .power-bar-text {
-            color: white;
-            font-weight: 600;
-            font-size: 1rem;
-            white-space: nowrap;
-            padding: 0 16px;
-        }
-        
-        .power-icons {
-            display: flex;
-            justify-content: space-between;
-            padding: 0 8px;
-        }
-        
-        .power-icon {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 4px;
-            color: var(--evcc-text-secondary);
-            font-size: 0.75rem;
-        }
-        
-        .power-icon svg {
-            width: 20px;
-            height: 20px;
-        }
-        
-        .power-icon.active {
-            color: var(--evcc-green);
-        }
-        
-        /* Energy Legend */
-        .energy-legend {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-top: 16px;
-            padding-top: 16px;
-            border-top: 1px solid var(--evcc-border);
-        }
-        
-        .legend-left, .legend-right {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 0.875rem;
-            color: var(--evcc-text-secondary);
-        }
-        
-        .legend-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 2px;
-        }
-        
-        .legend-dot.self {
-            background: var(--evcc-green);
-        }
-        
-        .legend-dot.export {
-            background: var(--evcc-yellow);
-        }
-        
-        /* Energy Flow Section */
-        .energy-flow {
+        /* Metric Cards */
+        .metrics {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
             margin-bottom: 24px;
         }
         
-        @media (max-width: 768px) {
-            .energy-flow {
+        @media (max-width: 640px) {
+            .metrics {
                 grid-template-columns: 1fr;
             }
         }
         
-        .flow-card {
+        .metric-card {
             background: var(--evcc-card);
             border-radius: 16px;
-            padding: 20px;
+            padding: 24px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
         
-        .flow-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid var(--evcc-border);
+        .metric-label {
+            font-size: 0.75rem;
+            color: var(--evcc-text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
         }
         
-        .flow-title {
+        .metric-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: var(--evcc-text);
+            line-height: 1;
+        }
+        
+        .metric-unit {
             font-size: 1rem;
-            font-weight: 700;
-            color: var(--evcc-text);
-        }
-        
-        .flow-value {
-            font-size: 1.125rem;
-            font-weight: 700;
-            color: var(--evcc-text);
-        }
-        
-        .flow-items {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        
-        .flow-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            padding: 8px 0;
-        }
-        
-        .flow-item-info {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-        }
-        
-        .flow-item-label {
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            font-weight: 400;
             color: var(--evcc-text-secondary);
-            font-size: 0.9375rem;
-        }
-        
-        .flow-item-value-section {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 2px;
-        }
-        
-        .flow-item-value {
-            font-weight: 600;
-            color: var(--evcc-text);
-            font-size: 0.9375rem;
-        }
-        
-        .flow-item-sub {
-            font-size: 0.8125rem;
-            color: var(--evcc-text-secondary);
-        }
-        
-        /* Icons using SVG */
-        .icon {
-            width: 18px;
-            height: 18px;
-            flex-shrink: 0;
-        }
-        
-        .icon svg {
-            width: 100%;
-            height: 100%;
+            margin-left: 4px;
         }
         
         /* Chart Cards */
@@ -474,23 +322,20 @@ HTML_DASHBOARD = """
         }
         
         .chart-title {
-            font-size: 1rem;
+            font-size: 0.875rem;
             font-weight: 600;
             color: var(--evcc-text);
-            display: flex;
-            align-items: center;
-            gap: 8px;
         }
         
         .timestamp {
-            font-size: 0.8125rem;
+            font-size: 0.75rem;
             color: var(--evcc-text-secondary);
         }
         
-        /* Legend for charts */
+        /* Legend */
         .legend {
             display: flex;
-            gap: 20px;
+            gap: 16px;
             margin-bottom: 16px;
             padding: 10px 14px;
             background: #f9fafb;
@@ -501,7 +346,7 @@ HTML_DASHBOARD = """
             display: flex;
             align-items: center;
             gap: 6px;
-            font-size: 0.8125rem;
+            font-size: 0.75rem;
             color: var(--evcc-text-secondary);
         }
         
@@ -513,50 +358,10 @@ HTML_DASHBOARD = """
         
         /* Footer */
         .footer {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 20px 24px;
+            text-align: center;
+            padding: 24px;
             color: var(--evcc-text-secondary);
-            font-size: 0.8125rem;
-            background: var(--evcc-card);
-            border-top: 1px solid var(--evcc-border);
-        }
-        
-        .footer-left {
-            font-weight: 600;
-        }
-        
-        .footer-right {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .solar-badge {
-            color: var(--evcc-green);
-            font-weight: 600;
-        }
-        
-        /* Responsive */
-        @media (max-width: 640px) {
-            .container {
-                padding: 16px;
-            }
-            
-            .power-bar-text {
-                font-size: 0.875rem;
-            }
-            
-            .flow-value {
-                font-size: 1rem;
-            }
-            
-            .footer {
-                flex-direction: column;
-                gap: 8px;
-                text-align: center;
-            }
+            font-size: 0.75rem;
         }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -571,113 +376,18 @@ HTML_DASHBOARD = """
     </div>
     
     <div class="container">
-        <!-- Main Power Display - Green bar like evcc -->
-        <div class="power-section">
-            <div class="power-bar-container">
-                <div class="power-bar-fill" id="powerBar" style="width: 0%;">
-                    <span class="power-bar-text" id="powerDisplay">-- kW</span>
+        <!-- Two Metric Cards -->
+        <div class="metrics">
+            <div class="metric-card">
+                <div class="metric-label">Current Power</div>
+                <div class="metric-value">
+                    <span id="power">--</span><span class="metric-unit">kW</span>
                 </div>
             </div>
-            <div class="power-icons">
-                <div class="power-icon active">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="5"/>
-                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-                    </svg>
-                    <span>In</span>
-                </div>
-                <div class="power-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="3" y="3" width="18" height="18" rx="2"/>
-                        <path d="M9 3v18M15 3v18"/>
-                    </svg>
-                    <span>Battery</span>
-                </div>
-                <div class="power-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="2" y="7" width="20" height="14" rx="2"/>
-                        <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
-                    </svg>
-                    <span>Loadpoint</span>
-                </div>
-                <div class="power-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                        <polyline points="9 22 9 12 15 12 15 22"/>
-                    </svg>
-                    <span>Home</span>
-                </div>
-                <div class="power-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-                        <path d="M2 17l10 5 10-5"/>
-                        <path d="M2 12l10 5 10-5"/>
-                    </svg>
-                    <span>Grid</span>
-                </div>
-            </div>
-            <div class="energy-legend">
-                <div class="legend-left">
-                    <span class="legend-dot self"></span>
-                    <span>Self-consumption</span>
-                </div>
-                <div class="legend-right">
-                    <span>Grid export</span>
-                    <span class="legend-dot export"></span>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Energy Flow Section (In/Out like evcc) -->
-        <div class="energy-flow">
-            <div class="flow-card">
-                <div class="flow-header">
-                    <span class="flow-title">In</span>
-                    <span class="flow-value" id="powerIn">0 W</span>
-                </div>
-                <div class="flow-items">
-                    <div class="flow-item">
-                        <div class="flow-item-info">
-                            <div class="flow-item-label">
-                                <span class="icon">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <circle cx="12" cy="12" r="5"/>
-                                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-                                    </svg>
-                                </span>
-                                Production
-                            </div>
-                            <div class="flow-item-sub" id="productionSub">0.0 kWh</div>
-                        </div>
-                        <div class="flow-item-value-section">
-                            <span class="flow-item-value" id="productionValue">0 W</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="flow-card">
-                <div class="flow-header">
-                    <span class="flow-title">Out</span>
-                    <span class="flow-value" id="powerOut">0 W</span>
-                </div>
-                <div class="flow-items">
-                    <div class="flow-item">
-                        <div class="flow-item-info">
-                            <div class="flow-item-label">
-                                <span class="icon">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                                        <polyline points="9 22 9 12 15 12 15 22"/>
-                                    </svg>
-                                </span>
-                                Consumption
-                            </div>
-                        </div>
-                        <div class="flow-item-value-section">
-                            <span class="flow-item-value" id="consumptionValue">--</span>
-                        </div>
-                    </div>
+            <div class="metric-card">
+                <div class="metric-label">Daily Energy</div>
+                <div class="metric-value">
+                    <span id="dailyEnergy">--</span><span class="metric-unit">kWh</span>
                 </div>
             </div>
         </div>
@@ -685,13 +395,7 @@ HTML_DASHBOARD = """
         <!-- Today's Chart -->
         <div class="chart-card">
             <div class="chart-header">
-                <div class="chart-title">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
-                        <rect x="3" y="3" width="18" height="18" rx="2"/>
-                        <path d="M9 3v18M15 3v18"/>
-                    </svg>
-                    Energy Generation Today
-                </div>
+                <div class="chart-title">Energy Generation Today</div>
                 <span class="timestamp" id="timestamp">--</span>
             </div>
             <div class="legend">
@@ -710,30 +414,18 @@ HTML_DASHBOARD = """
         <!-- 7 Day Chart -->
         <div class="chart-card">
             <div class="chart-header">
-                <div class="chart-title">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle;">
-                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-                        <line x1="16" y1="2" x2="16" y2="6"/>
-                        <line x1="8" y1="2" x2="8" y2="6"/>
-                        <line x1="3" y1="10" x2="21" y2="10"/>
-                    </svg>
-                    Last 7 Days Production
-                </div>
+                <div class="chart-title">Last 7 Days Production</div>
             </div>
             <canvas id="sevenDayChart"></canvas>
         </div>
     </div>
     
     <div class="footer">
-        <div class="footer-left">fronius2vim</div>
-        <div class="footer-right">
-            <span class="solar-badge">☀️ Solar energy</span>
-        </div>
+        fronius2vim
     </div>
 
     <script>
         let ws = null;
-        const MAX_POWER_KW = 35; // Max expected power for bar scaling
         
         // Chart.js setup for combined chart
         const ctx = document.getElementById('combinedChart').getContext('2d');
@@ -812,27 +504,13 @@ HTML_DASHBOARD = """
                     }
                 },
                 plugins: {
-                    legend: {
-                        display: false
-                    },
+                    legend: { display: false },
                     tooltip: {
                         backgroundColor: 'rgba(45, 51, 66, 0.95)',
                         padding: 12,
                         cornerRadius: 8,
                         titleFont: { size: 13 },
-                        bodyFont: { size: 12 },
-                        callbacks: {
-                            label: function(context) {
-                                let label = context.dataset.label || '';
-                                if (label) {
-                                    label += ': ';
-                                }
-                                if (context.parsed.y !== null) {
-                                    label += context.parsed.y.toFixed(2);
-                                }
-                                return label;
-                            }
-                        }
+                        bodyFont: { size: 12 }
                     }
                 }
             }
@@ -906,9 +584,7 @@ HTML_DASHBOARD = """
                     }
                 },
                 plugins: {
-                    legend: {
-                        display: false
-                    },
+                    legend: { display: false },
                     tooltip: {
                         backgroundColor: 'rgba(45, 51, 66, 0.95)',
                         padding: 12,
@@ -941,16 +617,6 @@ HTML_DASHBOARD = """
         fetchSevenDayData();
         setInterval(fetchSevenDayData, 3600000);
 
-        function updatePowerBar(powerKw) {
-            const bar = document.getElementById('powerBar');
-            const display = document.getElementById('powerDisplay');
-            
-            // Calculate percentage (max 35kW)
-            const percentage = Math.min((powerKw / MAX_POWER_KW) * 100, 100);
-            bar.style.width = Math.max(percentage, 5) + '%'; // Min 5% for visibility
-            display.textContent = powerKw.toFixed(1) + ' kW';
-        }
-
         function connect() {
             ws = new WebSocket(`ws://${window.location.host}/ws`);
             
@@ -963,15 +629,11 @@ HTML_DASHBOARD = """
                 const data = JSON.parse(event.data);
                 
                 if (data.power !== undefined) {
-                    const powerKw = data.power / 1000;
-                    updatePowerBar(powerKw);
-                    document.getElementById('powerIn').textContent = Math.round(data.power) + ' W';
-                    document.getElementById('productionValue').textContent = Math.round(data.power) + ' W';
+                    document.getElementById('power').textContent = (data.power / 1000).toFixed(2);
                 }
                 
                 if (data.daily_energy !== undefined) {
-                    const dailyKwh = data.daily_energy / 1000;
-                    document.getElementById('productionSub').textContent = dailyKwh.toFixed(1) + ' kWh';
+                    document.getElementById('dailyEnergy').textContent = (data.daily_energy / 1000).toFixed(2);
                 }
 
                 if (data.timestamp) {
@@ -980,7 +642,7 @@ HTML_DASHBOARD = """
             };
             
             ws.onclose = () => {
-                document.getElementById('statusText').textContent = 'Disconnected - Retrying...';
+                document.getElementById('statusText').textContent = 'Disconnected';
                 document.getElementById('statusDot').className = 'status-dot';
                 setTimeout(connect, 5000);
             };
