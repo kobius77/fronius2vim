@@ -453,7 +453,7 @@ HTML_DASHBOARD = """
         }
         
         .log-value {
-            color: #3498db;
+            color: #faf000;
         }
         
         .log-labels {
@@ -515,7 +515,7 @@ HTML_DASHBOARD = """
                     <span>Energy (kWh)</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background: rgba(52, 152, 219, 1);"></div>
+                    <div class="legend-color" style="background: #faf000;"></div>
                     <span>Power (kW)</span>
                 </div>
             </div>
@@ -570,8 +570,8 @@ HTML_DASHBOARD = """
                         label: 'Power (kW)',
                         data: [],
                         type: 'line',
-                        borderColor: 'rgba(52, 152, 219, 1)',
-                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        borderColor: '#faf000',
+                        backgroundColor: 'rgba(250, 240, 0, 0.1)',
                         borderWidth: 2,
                         tension: 0.4,
                         pointRadius: 0,
