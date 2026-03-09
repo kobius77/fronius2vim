@@ -234,17 +234,26 @@ HTML_DASHBOARD = """
         }
         
         :root {
-            --evcc-green: #2ecc71;
-            --evcc-text: #2d3342;
-            --evcc-text-secondary: #6b7280;
-            --evcc-bg: #f3f4f6;
+            --evcc-green: #baffcb;
+            --evcc-dark-green: #0fde41;
+            --evcc-darker-green: #0ba631;
+            --evcc-yellow: #faf000;
+            --evcc-orange: #ff9000;
+            --evcc-red: #fc440f;
+            --bs-gray-dark: #28293e;
+            --bs-gray-medium: #93949e;
+            --bs-gray-bright: #f3f3f7;
+            --bs-gray-brighter: #f9f9fb;
+            --evcc-background: var(--bs-gray-bright);
             --evcc-card: #ffffff;
-            --evcc-border: #e5e7eb;
+            --evcc-box-border: var(--bs-gray-brighter);
+            --evcc-text: var(--bs-gray-dark);
+            --evcc-text-secondary: var(--bs-gray-medium);
         }
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: var(--evcc-bg);
+            background: var(--evcc-background);
             color: var(--evcc-text);
             min-height: 100vh;
         }
@@ -252,7 +261,7 @@ HTML_DASHBOARD = """
         /* Top Bar */
         .top-bar {
             background: var(--evcc-card);
-            border-bottom: 1px solid var(--evcc-border);
+            border-bottom: 1px solid var(--evcc-box-border);
             padding: 16px 24px;
             display: flex;
             justify-content: space-between;
@@ -283,7 +292,7 @@ HTML_DASHBOARD = """
         }
         
         .status-dot.connected {
-            background: var(--evcc-green);
+            background: var(--evcc-dark-green);
         }
         
         /* Main Container */
@@ -400,7 +409,7 @@ HTML_DASHBOARD = """
             display: flex;
             gap: 12px;
             padding: 8px 12px;
-            border-bottom: 1px solid var(--evcc-border);
+            border-bottom: 1px solid var(--evcc-box-border);
             animation: fadeIn 0.3s ease;
         }
         
@@ -409,7 +418,7 @@ HTML_DASHBOARD = """
         }
         
         @keyframes fadeIn {
-            from { opacity: 0; background: rgba(46, 204, 113, 0.1); }
+            from { opacity: 0; background: rgba(13, 222, 65, 0.1); }
             to { opacity: 1; background: transparent; }
         }
         
@@ -426,7 +435,7 @@ HTML_DASHBOARD = """
         }
         
         .log-status.success {
-            color: var(--evcc-green);
+            color: var(--evcc-dark-green);
         }
         
         .log-status.error {
@@ -502,7 +511,7 @@ HTML_DASHBOARD = """
             </div>
             <div class="legend">
                 <div class="legend-item">
-                    <div class="legend-color" style="background: rgba(46, 204, 113, 0.8);"></div>
+                    <div class="legend-color" style="background: rgba(13, 222, 65, 0.8);"></div>
                     <span>Energy (kWh)</span>
                 </div>
                 <div class="legend-item">
@@ -668,8 +677,8 @@ HTML_DASHBOARD = """
                 datasets: [{
                     label: 'Energy (kWh)',
                     data: [],
-                    backgroundColor: 'rgba(46, 204, 113, 0.8)',
-                    borderColor: 'rgba(46, 204, 113, 1)',
+                    backgroundColor: 'rgba(13, 222, 65, 0.8)',
+                    borderColor: 'rgba(13, 222, 65, 1)',
                     borderWidth: 0,
                     borderRadius: 4,
                 }]
