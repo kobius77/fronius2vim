@@ -40,6 +40,10 @@ latest_data: Dict[str, Any] = {
     "daily_energy": 0,
 }
 
+# Log of recent metrics written to VictoriaMetrics (for dashboard)
+metrics_log: list = []
+MAX_LOG_ENTRIES = 50
+
 
 class FroniusCollector:
     """Collects data from Fronius inverter API"""
@@ -111,6 +115,7 @@ class VictoriaMetricsWriter:
         self, name: str, value: float, labels: Optional[Dict[str, str]] = None
     ):
         """Write a single metric to VictoriaMetrics"""
+        global metrics_log
         if labels is None:
             labels = {}
 
@@ -130,8 +135,34 @@ class VictoriaMetricsWriter:
                 headers={"Content-Type": "text/plain"},
             )
             response.raise_for_status()
+
+            # Log to dashboard metrics log
+            entry = {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "metric": name,
+                "value": value,
+                "labels": labels,
+                "status": "success",
+            }
+            metrics_log.insert(0, entry)
+            if len(metrics_log) > MAX_LOG_ENTRIES:
+                metrics_log = metrics_log[:MAX_LOG_ENTRIES]
+
             logger.debug(f"Wrote metric: {metric_line}")
         except Exception as e:
+            # Log failure
+            entry = {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "metric": name,
+                "value": value,
+                "labels": labels,
+                "status": "error",
+                "error": str(e),
+            }
+            metrics_log.insert(0, entry)
+            if len(metrics_log) > MAX_LOG_ENTRIES:
+                metrics_log = metrics_log[:MAX_LOG_ENTRIES]
+
             logger.error(f"Failed to write metric to VictoriaMetrics: {e}")
 
     async def write_realtime_metrics(self, data: Dict):
@@ -356,6 +387,77 @@ HTML_DASHBOARD = """
             border-radius: 2px;
         }
         
+        /* Metrics Log */
+        .metrics-log {
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
+            font-size: 0.75rem;
+            line-height: 1.5;
+        }
+        
+        .log-entry {
+            display: flex;
+            gap: 12px;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--evcc-border);
+            animation: fadeIn 0.3s ease;
+        }
+        
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; background: rgba(46, 204, 113, 0.1); }
+            to { opacity: 1; background: transparent; }
+        }
+        
+        .log-time {
+            color: var(--evcc-text-secondary);
+            flex-shrink: 0;
+            min-width: 60px;
+        }
+        
+        .log-status {
+            flex-shrink: 0;
+            width: 16px;
+            text-align: center;
+        }
+        
+        .log-status.success {
+            color: var(--evcc-green);
+        }
+        
+        .log-status.error {
+            color: #ef4444;
+        }
+        
+        .log-data {
+            flex: 1;
+            word-break: break-all;
+        }
+        
+        .log-metric {
+            color: var(--evcc-text);
+            font-weight: 600;
+        }
+        
+        .log-value {
+            color: #3498db;
+        }
+        
+        .log-labels {
+            color: var(--evcc-text-secondary);
+        }
+        
+        .log-empty {
+            padding: 24px;
+            text-align: center;
+            color: var(--evcc-text-secondary);
+            font-style: italic;
+        }
+        
         /* Footer */
         .footer {
             text-align: center;
@@ -417,6 +519,17 @@ HTML_DASHBOARD = """
                 <div class="chart-title">Last 7 Days Production</div>
             </div>
             <canvas id="sevenDayChart"></canvas>
+        </div>
+        
+        <!-- Raw Metrics Log -->
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">Raw Metrics to VictoriaMetrics</div>
+                <span class="timestamp">Last 50 writes</span>
+            </div>
+            <div class="metrics-log" id="metricsLog">
+                <div class="log-empty">Waiting for metrics...</div>
+            </div>
         </div>
     </div>
     
@@ -486,6 +599,7 @@ HTML_DASHBOARD = """
                         display: true,
                         position: 'right',
                         beginAtZero: true,
+                        max: 35,
                         grid: { display: false },
                         ticks: { 
                             color: '#3498db',
@@ -638,6 +752,25 @@ HTML_DASHBOARD = """
 
                 if (data.timestamp) {
                     document.getElementById('timestamp').textContent = data.timestamp;
+                }
+                
+                // Update metrics log display
+                if (data.metrics_log && data.metrics_log.length > 0) {
+                    const logContainer = document.getElementById('metricsLog');
+                    logContainer.innerHTML = data.metrics_log.map(entry => {
+                        const labels = Object.entries(entry.labels || {}).map(([k,v]) => `${k}="${v}"`).join(', ');
+                        return `
+                            <div class="log-entry">
+                                <span class="log-time">${entry.timestamp}</span>
+                                <span class="log-status ${entry.status}">${entry.status === 'success' ? '✓' : '✗'}</span>
+                                <span class="log-data">
+                                    <span class="log-metric">${entry.metric}</span>
+                                    <span class="log-value">${entry.value}</span>
+                                    <span class="log-labels">{${labels}}</span>
+                                </span>
+                            </div>
+                        `;
+                    }).join('');
                 }
             };
             
@@ -846,10 +979,22 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(latest_data)
+            data = {
+                "power": latest_data.get("power", 0),
+                "daily_energy": latest_data.get("daily_energy", 0),
+                "timestamp": latest_data.get("timestamp", ""),
+                "metrics_log": metrics_log,
+            }
+            await websocket.send_json(data)
             await asyncio.sleep(REALTIME_INTERVAL)
     except Exception:
         await websocket.close()
+
+
+@app.get("/api/metrics-log")
+async def get_metrics_log():
+    """Get recent metrics written to VictoriaMetrics"""
+    return {"metrics": metrics_log}
 
 
 @app.on_event("startup")
