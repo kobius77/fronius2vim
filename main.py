@@ -559,8 +559,8 @@ HTML_DASHBOARD = """
                     {
                         label: 'Energy (kWh)',
                         data: [],
-                        backgroundColor: 'rgba(11, 166, 49, 0.8)',
-                        borderColor: 'rgba(11, 166, 49, 1)',
+                        backgroundColor: 'rgba(15, 222, 65, 0.8)',
+                        borderColor: 'rgba(15, 222, 65, 1)',
                         borderWidth: 0,
                         borderRadius: 3,
                         yAxisID: 'y',
@@ -815,14 +815,14 @@ async def get_data():
 
 @app.get("/api/history")
 async def get_history():
-    """Query VictoriaMetrics for today's energy data per 15min intervals"""
+    """Query VictoriaMetrics for last 24 hours of energy data"""
     try:
-        # Calculate today's start timestamp (midnight UTC for VictoriaMetrics)
+        # Calculate 24 hours ago timestamp (UTC for VictoriaMetrics)
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        start_of_day_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_timestamp = int(start_of_day_utc.timestamp())
+        start_24h_utc = now_utc - timedelta(hours=24)
+        start_timestamp = int(start_24h_utc.timestamp())
 
-        # Query VictoriaMetrics for daily energy data today (hourly)
+        # Query VictoriaMetrics for energy data last 24 hours (hourly)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "fronius_daily_energy_watthours",
@@ -869,14 +869,14 @@ async def get_history():
 
 @app.get("/api/power")
 async def get_power():
-    """Query VictoriaMetrics for today's power data (watts)"""
+    """Query VictoriaMetrics for last 24 hours of power data (watts)"""
     try:
-        # Calculate today's start timestamp (midnight UTC for VictoriaMetrics)
+        # Calculate 24 hours ago timestamp (UTC for VictoriaMetrics)
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        start_of_day_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_timestamp = int(start_of_day_utc.timestamp())
+        start_24h_utc = now_utc - timedelta(hours=24)
+        start_timestamp = int(start_24h_utc.timestamp())
 
-        # Query VictoriaMetrics for power data today (hourly to match energy)
+        # Query VictoriaMetrics for power data last 24 hours (hourly)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "avg_over_time(fronius_power_watts[1h])",
