@@ -7,7 +7,7 @@ Polls Fronius Solar API and writes metrics to VictoriaMetrics
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -138,7 +138,7 @@ class VictoriaMetricsWriter:
 
             # Log to dashboard metrics log
             entry = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "timestamp": datetime.utcnow().strftime("%H:%M:%S"),
                 "metric": name,
                 "value": value,
                 "labels": labels,
@@ -152,7 +152,7 @@ class VictoriaMetricsWriter:
         except Exception as e:
             # Log failure
             entry = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "timestamp": datetime.utcnow().strftime("%H:%M:%S"),
                 "metric": name,
                 "value": value,
                 "labels": labels,
@@ -677,8 +677,8 @@ HTML_DASHBOARD = """
                 datasets: [{
                     label: 'Energy (kWh)',
                     data: [],
-                    backgroundColor: 'rgba(11, 166, 49, 0.8)',
-                    borderColor: 'rgba(11, 166, 49, 1)',
+                    backgroundColor: 'rgba(15, 222, 65, 0.8)',
+                    borderColor: 'rgba(15, 222, 65, 1)',
                     borderWidth: 0,
                     borderRadius: 4,
                 }]
@@ -817,17 +817,17 @@ async def get_data():
 async def get_history():
     """Query VictoriaMetrics for today's energy data per 15min intervals"""
     try:
-        # Calculate today's start timestamp (midnight)
-        now = datetime.now()
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_timestamp = int(start_of_day.timestamp())
+        # Calculate today's start timestamp (midnight UTC for VictoriaMetrics)
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        start_of_day_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_timestamp = int(start_of_day_utc.timestamp())
 
         # Query VictoriaMetrics for daily energy data today (hourly)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "fronius_daily_energy_watthours",
             "start": start_timestamp,
-            "end": int(now.timestamp()),
+            "end": int(now_utc.timestamp()),
             "step": "1h",
         }
 
@@ -871,17 +871,17 @@ async def get_history():
 async def get_power():
     """Query VictoriaMetrics for today's power data (watts)"""
     try:
-        # Calculate today's start timestamp (midnight)
-        now = datetime.now()
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_timestamp = int(start_of_day.timestamp())
+        # Calculate today's start timestamp (midnight UTC for VictoriaMetrics)
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        start_of_day_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_timestamp = int(start_of_day_utc.timestamp())
 
         # Query VictoriaMetrics for power data today (hourly to match energy)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {
             "query": "avg_over_time(fronius_power_watts[1h])",
             "start": start_timestamp,
-            "end": int(now.timestamp()),
+            "end": int(now_utc.timestamp()),
             "step": "1h",
         }
 
