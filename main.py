@@ -564,11 +564,11 @@ HTML_DASHBOARD = """
                         borderWidth: 0,
                         borderRadius: 3,
                         yAxisID: 'y',
-                        order: 2
+                        order: 2,
+                        barPercentage: 1.0,
+                        categoryPercentage: 3.8
                     },
                     {
-                        label: 'Power (kW)',
-                        data: [],
                         type: 'line',
                         borderColor: '#faf000',
                         backgroundColor: 'rgba(250, 240, 0, 0.1)',
@@ -642,24 +642,15 @@ HTML_DASHBOARD = """
         // Fetch combined data
         async function fetchCombinedData() {
             try {
-                const [historyRes, powerRes] = await Promise.all([
-                    fetch('/api/history'),
-                    fetch('/api/power')
-                ]);
+                const response = await fetch('/api/today');
+                const data = await response.json();
                 
-                const historyData = await historyRes.json();
-                const powerData = await powerRes.json();
-                
-                if (historyData.intervals && historyData.intervals.length > 0) {
-                    combinedChart.data.labels = historyData.intervals.map(i => i.time);
-                    combinedChart.data.datasets[0].data = historyData.intervals.map(i => i.kwh);
+                if (data.points && data.points.length > 0) {
+                    combinedChart.data.labels = data.points.map(p => p.time);
+                    combinedChart.data.datasets[0].data = data.points.map(p => p.kwh);
+                    combinedChart.data.datasets[1].data = data.points.map(p => p.power / 1000);
+                    combinedChart.update();
                 }
-                
-                if (powerData.points && powerData.points.length > 0) {
-                    combinedChart.data.datasets[1].data = powerData.points.map(p => p.power / 1000);
-                }
-                
-                combinedChart.update();
             } catch (error) {
                 console.error('Failed to fetch combined data:', error);
             }
@@ -813,103 +804,104 @@ async def get_data():
     return latest_data
 
 
-@app.get("/api/history")
-async def get_history():
-    """Query VictoriaMetrics for last 24 hours of energy data"""
+@app.get("/api/today")
+async def get_today():
+    """Query VictoriaMetrics for last 24 hours of combined energy and power data at 15m intervals"""
     try:
-        # Calculate 24 hours ago timestamp (UTC for VictoriaMetrics)
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         start_24h_utc = now_utc - timedelta(hours=24)
         start_timestamp = int(start_24h_utc.timestamp())
 
-        # Query VictoriaMetrics for energy data last 24 hours (hourly)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
-        params = {
+
+        # Energy query (15m step)
+        energy_params = {
             "query": "fronius_daily_energy_watthours",
             "start": start_timestamp,
             "end": int(now_utc.timestamp()),
-            "step": "1h",
+            "step": "15m",
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(query_url, params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            if data.get("status") == "success" and data.get("data", {}).get("result"):
-                result = data["data"]["result"][0]
-                values = result.get("values", [])
-
-                # Calculate kWh per hour interval
-                intervals = []
-                for i in range(1, len(values)):
-                    timestamp = int(values[i][0])
-                    current_wh = float(values[i][1])
-                    previous_wh = float(values[i - 1][1])
-                    kwh_generated = (current_wh - previous_wh) / 1000
-
-                    # Skip negative values (inverter counter reset at midnight)
-                    if kwh_generated >= 0:
-                        intervals.append(
-                            {
-                                "time": datetime.fromtimestamp(timestamp).strftime(
-                                    "%H:00"
-                                ),
-                                "kwh": round(kwh_generated, 2),
-                            }
-                        )
-
-                return {"intervals": intervals}
-
-        return {"intervals": []}
-    except Exception as e:
-        logger.error(f"Failed to fetch history: {e}")
-        return {"intervals": [], "error": str(e)}
-
-
-@app.get("/api/power")
-async def get_power():
-    """Query VictoriaMetrics for last 24 hours of power data (watts)"""
-    try:
-        # Calculate 24 hours ago timestamp (UTC for VictoriaMetrics)
-        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        start_24h_utc = now_utc - timedelta(hours=24)
-        start_timestamp = int(start_24h_utc.timestamp())
-
-        # Query VictoriaMetrics for power data last 24 hours (hourly)
-        query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
-        params = {
-            "query": "avg_over_time(fronius_power_watts[1h])",
+        # Power query (15m step)
+        power_params = {
+            "query": "avg_over_time(fronius_power_watts[15m])",
             "start": start_timestamp,
             "end": int(now_utc.timestamp()),
-            "step": "1h",
+            "step": "15m",
         }
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(query_url, params=params)
-            response.raise_for_status()
-            data = response.json()
+            e_res, p_res = await asyncio.gather(
+                client.get(query_url, params=energy_params),
+                client.get(query_url, params=power_params),
+            )
+            e_res.raise_for_status()
+            p_res.raise_for_status()
 
-            if data.get("status") == "success" and data.get("data", {}).get("result"):
-                result = data["data"]["result"][0]
-                values = result.get("values", [])
+            e_data = e_res.json()
+            p_data = p_res.json()
 
-                points = []
-                for value in values:
-                    timestamp = int(value[0])
-                    power = float(value[1])
-                    points.append(
-                        {
-                            "time": datetime.fromtimestamp(timestamp).strftime("%H:00"),
-                            "power": round(power, 0),
-                        }
-                    )
+            # Process Energy (calculate 15m diffs, then sum up hourly)
+            e_points_15m = {}
+            if e_data.get("status") == "success" and e_data.get("data", {}).get(
+                "result"
+            ):
+                values = e_data["data"]["result"][0].get("values", [])
+                for i in range(1, len(values)):
+                    ts = int(values[i][0])
+                    curr = float(values[i][1])
+                    prev = float(values[i - 1][1])
+                    kwh_generated = (curr - prev) / 1000
 
-                return {"points": points}
+                    if kwh_generated >= 0:
+                        e_points_15m[ts] = kwh_generated
 
-        return {"points": []}
+            # Process Power (15m)
+            p_points = {}
+            if p_data.get("status") == "success" and p_data.get("data", {}).get(
+                "result"
+            ):
+                values = p_data["data"]["result"][0].get("values", [])
+                for v in values:
+                    ts = int(v[0])
+                    power = float(v[1])
+                    p_points[ts] = round(power, 0)
+
+            # Merge exactly by timestamp
+            all_ts = sorted(set(e_points_15m.keys()) | set(p_points.keys()))
+
+            # Group into hourly sums and assign them to the middle of the hour (:30)
+            hourly_kwh_sums = {}
+            current_hour_kwh = 0.0
+
+            for ts in all_ts:
+                dt = datetime.fromtimestamp(ts)
+                current_hour_kwh += e_points_15m.get(ts, 0.0)
+
+                # We emit the hourly sum exactly on the hour mark (XX:00)
+                # but assign it to the midpoint of the hour (XX:30) for perfect chart alignment
+                if dt.minute == 0:
+                    center_ts = ts - 1800  # 30 mins before the end of the hour
+                    hourly_kwh_sums[center_ts] = round(current_hour_kwh, 2)
+                    current_hour_kwh = 0.0
+
+            points = []
+            for ts in all_ts:
+                dt = datetime.fromtimestamp(ts)
+                kwh_val = hourly_kwh_sums.get(ts, None)
+
+                points.append(
+                    {
+                        "time": dt.strftime("%H:%M"),
+                        "kwh": kwh_val,
+                        "power": p_points.get(ts, 0.0),
+                    }
+                )
+
+            return {"points": points}
+
     except Exception as e:
-        logger.error(f"Failed to fetch power: {e}")
+        logger.error(f"Failed to fetch today data: {e}")
         return {"points": [], "error": str(e)}
 
 
