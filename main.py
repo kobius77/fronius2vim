@@ -26,14 +26,14 @@ WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # MQTT Configuration
-MQTT_HOST = os.getenv("MQTT_HOST", "")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power")
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
-MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "fronius2vim")
-MQTT_RETAIN = os.getenv("MQTT_RETAIN", "false").lower() in ("true", "1", "yes")
-MQTT_QOS = int(os.getenv("MQTT_QOS", "0"))
+MQTT_HOST = os.getenv("MQTT_HOST", "").strip().strip("\"'")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883").strip().strip("\"'"))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power").strip().strip("\"'")
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "").strip().strip("\"'")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "").strip().strip("\"'")
+MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "fronius2vim").strip().strip("\"'")
+MQTT_RETAIN = os.getenv("MQTT_RETAIN", "true").strip().strip("\"'").lower() in ("true", "1", "yes")
+MQTT_QOS = int(os.getenv("MQTT_QOS", "0").strip().strip("\"'"))
 
 # Setup logging
 logging.basicConfig(
@@ -238,11 +238,11 @@ class MqttPublisher:
         password: Optional[str] = None,
         client_id: str = "fronius2vim",
         qos: int = 0,
-        retain: bool = False,
+        retain: bool = True,
     ):
-        self.host = host.strip() if host else ""
+        self.host = host.strip().strip("\"'") if host else ""
         self.port = port
-        self.topic = topic
+        self.topic = topic.strip().strip("\"'") if topic else "froniusalt/power"
         self.qos = qos
         self.retain = retain
         self.client: Optional[mqtt.Client] = None
@@ -267,11 +267,12 @@ class MqttPublisher:
 
             self.client.on_connect = self._on_connect
             self.client.on_disconnect = self._on_disconnect
+            self.client.on_publish = self._on_publish
 
             self.client.connect_async(self.host, self.port, keepalive=60)
             self.client.loop_start()
             logger.info(
-                f"MQTT client connecting to {self.host}:{self.port}, topic: {self.topic}"
+                f"MQTT client connecting to {self.host}:{self.port}, topic: '{self.topic}' (retain={self.retain}, qos={self.qos})"
             )
         except Exception as e:
             logger.error(f"Failed to initialize MQTT client: {e}")
@@ -290,6 +291,9 @@ class MqttPublisher:
         self.connected = False
         logger.warning(f"Disconnected from MQTT broker ({self.host}:{self.port})")
 
+    def _on_publish(self, client, userdata, mid, reason_codes=None, properties=None):
+        logger.debug(f"MQTT message mid={mid} acknowledged by broker")
+
     def publish_power(self, power: float):
         """Publish power value as plain number to MQTT topic"""
         if not self.client:
@@ -301,10 +305,10 @@ class MqttPublisher:
             )
             if res.rc != mqtt.MQTT_ERR_SUCCESS:
                 logger.warning(
-                    f"MQTT publish to {self.topic} returned error code: {res.rc}"
+                    f"MQTT publish to '{self.topic}' returned error code: {res.rc}"
                 )
             else:
-                logger.info(f"Published to MQTT {self.topic}: {payload} W")
+                logger.info(f"Published to MQTT '{self.topic}': {payload} W (retain={self.retain})")
         except Exception as e:
             logger.error(f"Failed to publish to MQTT: {e}")
 
