@@ -56,6 +56,47 @@ metrics_log: list = []
 MAX_LOG_ENTRIES = 50
 
 
+def extract_metric_value(metric_data: Any) -> float:
+    """Safely extract numeric metric values from all Fronius Solar API formats (SnapINverter, Symo, Gen24)"""
+    if not metric_data:
+        return 0.0
+    if isinstance(metric_data, (int, float)):
+        return float(metric_data)
+    if not isinstance(metric_data, dict):
+        return 0.0
+
+    # 1. Check "Values" dictionary (Scope=System / standard)
+    values = metric_data.get("Values")
+    if isinstance(values, dict):
+        total = 0.0
+        for v in values.values():
+            if v is not None:
+                try:
+                    total += float(v)
+                except (ValueError, TypeError):
+                    pass
+        return total
+
+    # 2. Check "Value" field (Scope=Device, Gen24 Scope=System, or direct value)
+    value = metric_data.get("Value")
+    if isinstance(value, dict):
+        total = 0.0
+        for v in value.values():
+            if v is not None:
+                try:
+                    total += float(v)
+                except (ValueError, TypeError):
+                    pass
+        return total
+    elif value is not None:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            pass
+
+    return 0.0
+
+
 class FroniusCollector:
     """Collects data from Fronius inverter API"""
 
@@ -76,13 +117,8 @@ class FroniusCollector:
 
             body = data.get("Body", {}).get("Data", {})
 
-            # Sum values from all inverters
-            def sum_all_inverters(metric_dict):
-                values = metric_dict.get("Values", {})
-                return sum(float(v) for v in values.values())
-
             return {
-                "power": sum_all_inverters(body.get("PAC", {})),
+                "power": extract_metric_value(body.get("PAC")),
             }
         except Exception as e:
             logger.error(f"Failed to get realtime data: {e}")
@@ -100,15 +136,10 @@ class FroniusCollector:
 
             body = data.get("Body", {}).get("Data", {})
 
-            # Sum values from all inverters
-            def sum_all_inverters(metric_dict):
-                values = metric_dict.get("Values", {})
-                return sum(float(v) for v in values.values())
-
             return {
-                "daily": sum_all_inverters(body.get("DAY_ENERGY", {})),
-                "yearly": sum_all_inverters(body.get("YEAR_ENERGY", {})),
-                "total": sum_all_inverters(body.get("TOTAL_ENERGY", {})),
+                "daily": extract_metric_value(body.get("DAY_ENERGY")),
+                "yearly": extract_metric_value(body.get("YEAR_ENERGY")),
+                "total": extract_metric_value(body.get("TOTAL_ENERGY")),
             }
         except Exception as e:
             logger.error(f"Failed to get energy data: {e}")
@@ -265,10 +296,15 @@ class MqttPublisher:
             return
         try:
             payload = f"{power:.1f}"
-            self.client.publish(
+            res = self.client.publish(
                 self.topic, payload=payload, qos=self.qos, retain=self.retain
             )
-            logger.debug(f"Published to MQTT {self.topic}: {payload}")
+            if res.rc != mqtt.MQTT_ERR_SUCCESS:
+                logger.warning(
+                    f"MQTT publish to {self.topic} returned error code: {res.rc}"
+                )
+            else:
+                logger.info(f"Published to MQTT {self.topic}: {payload} W")
         except Exception as e:
             logger.error(f"Failed to publish to MQTT: {e}")
 
