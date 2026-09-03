@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import httpx
+import paho.mqtt.client as mqtt
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -23,6 +24,16 @@ REALTIME_INTERVAL = int(os.getenv("REALTIME_INTERVAL", "10"))
 ENERGY_INTERVAL = int(os.getenv("ENERGY_INTERVAL", "900"))
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# MQTT Configuration
+MQTT_HOST = os.getenv("MQTT_HOST", "")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power")
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
+MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "fronius2vim")
+MQTT_RETAIN = os.getenv("MQTT_RETAIN", "false").lower() in ("true", "1", "yes")
+MQTT_QOS = int(os.getenv("MQTT_QOS", "0"))
 
 # Setup logging
 logging.basicConfig(
@@ -184,8 +195,93 @@ class VictoriaMetricsWriter:
         )
 
 
+class MqttPublisher:
+    """Publishes inverter metrics to MQTT broker"""
+
+    def __init__(
+        self,
+        host: str,
+        port: int = 1883,
+        topic: str = "froniusalt/power",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        client_id: str = "fronius2vim",
+        qos: int = 0,
+        retain: bool = False,
+    ):
+        self.host = host.strip() if host else ""
+        self.port = port
+        self.topic = topic
+        self.qos = qos
+        self.retain = retain
+        self.client: Optional[mqtt.Client] = None
+
+        if not self.host:
+            logger.info("MQTT publishing disabled (MQTT_HOST not set)")
+            return
+
+        try:
+            if hasattr(mqtt, "CallbackAPIVersion"):
+                self.client = mqtt.Client(
+                    mqtt.CallbackAPIVersion.VERSION2, client_id=client_id
+                )
+            else:
+                self.client = mqtt.Client(client_id=client_id)
+
+            if username and password:
+                self.client.username_pw_set(username, password)
+            elif username:
+                self.client.username_pw_set(username)
+
+            self.client.on_connect = self._on_connect
+            self.client.on_disconnect = self._on_disconnect
+
+            self.client.connect_async(self.host, self.port, keepalive=60)
+            self.client.loop_start()
+            logger.info(
+                f"MQTT client connecting to {self.host}:{self.port}, topic: {self.topic}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize MQTT client: {e}")
+            self.client = None
+
+    def _on_connect(self, client, userdata, flags, rc, properties=None):
+        rc_code = getattr(rc, "value", rc) if rc is not None else 0
+        if rc_code == 0:
+            logger.info(f"Connected to MQTT broker at {self.host}:{self.port}")
+        else:
+            logger.warning(f"Failed to connect to MQTT broker with return code: {rc}")
+
+    def _on_disconnect(self, client, userdata, *args, **kwargs):
+        logger.warning(f"Disconnected from MQTT broker ({self.host}:{self.port})")
+
+    def publish_power(self, power: float):
+        """Publish power value as plain number to MQTT topic"""
+        if not self.client:
+            return
+        try:
+            payload = f"{power:.1f}"
+            self.client.publish(
+                self.topic, payload=payload, qos=self.qos, retain=self.retain
+            )
+            logger.debug(f"Published to MQTT {self.topic}: {payload}")
+        except Exception as e:
+            logger.error(f"Failed to publish to MQTT: {e}")
+
+    def close(self):
+        """Stop MQTT loop and disconnect client"""
+        if self.client:
+            try:
+                self.client.loop_stop()
+                self.client.disconnect()
+            except Exception:
+                pass
+
+
 async def realtime_collector(
-    collector: FroniusCollector, writer: VictoriaMetricsWriter
+    collector: FroniusCollector,
+    writer: VictoriaMetricsWriter,
+    mqtt_publisher: Optional[MqttPublisher] = None,
 ):
     """Background task: collect real-time data every 10 seconds"""
     while True:
@@ -193,6 +289,8 @@ async def realtime_collector(
             data = await collector.get_realtime_data()
             if data:
                 await writer.write_realtime_metrics(data)
+                if mqtt_publisher:
+                    mqtt_publisher.publish_power(data["power"])
                 # Update cache for WebSocket
                 latest_data["power"] = data["power"]
                 latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -998,21 +1096,47 @@ async def get_metrics_log():
     return {"metrics": metrics_log}
 
 
+mqtt_publisher: Optional[MqttPublisher] = None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Start background collectors on app startup"""
+    global mqtt_publisher
     collector = FroniusCollector(FRONIUS_HOST)
     writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
+    mqtt_publisher = MqttPublisher(
+        host=MQTT_HOST,
+        port=MQTT_PORT,
+        topic=MQTT_TOPIC,
+        username=MQTT_USERNAME if MQTT_USERNAME else None,
+        password=MQTT_PASSWORD if MQTT_PASSWORD else None,
+        client_id=MQTT_CLIENT_ID,
+        qos=MQTT_QOS,
+        retain=MQTT_RETAIN,
+    )
 
-    logger.info(f"Starting fronius2vim")
+    logger.info("Starting fronius2vim")
     logger.info(f"Fronius host: {FRONIUS_HOST}")
     logger.info(f"VictoriaMetrics URL: {VICTORIAMETRICS_URL}")
+    if MQTT_HOST:
+        logger.info(f"MQTT broker: {MQTT_HOST}:{MQTT_PORT}, topic: {MQTT_TOPIC}")
+    else:
+        logger.info("MQTT broker: disabled (MQTT_HOST not set)")
     logger.info(f"Realtime interval: {REALTIME_INTERVAL}s")
     logger.info(f"Energy interval: {ENERGY_INTERVAL}s")
 
     # Start background tasks
-    asyncio.create_task(realtime_collector(collector, writer))
+    asyncio.create_task(realtime_collector(collector, writer, mqtt_publisher))
     asyncio.create_task(energy_collector(collector, writer))
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on app shutdown"""
+    global mqtt_publisher
+    if mqtt_publisher:
+        mqtt_publisher.close()
 
 
 if __name__ == "__main__":

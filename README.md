@@ -6,6 +6,7 @@ A Python-based tool that reads data from a Fronius PV inverter and writes it to 
 
 - **Dual-rate collection**: Real-time metrics every 10 seconds, energy counters every 15 minutes
 - **VictoriaMetrics integration**: Native Prometheus protocol support
+- **MQTT publishing**: Publishes currently produced inverter power (W) to an MQTT broker
 - **Web dashboard**: Real-time WebSocket updates with dark theme
 - **Docker support**: Easy deployment with docker-compose
 - **Automatic updates**: Watchtower auto-redeploys on new commits
@@ -62,6 +63,14 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 | `ENERGY_INTERVAL` | `900` | Energy data poll interval (seconds) |
 | `WEB_PORT` | `8080` | Web UI port |
 | `LOG_LEVEL` | `INFO` | Logging level |
+| `MQTT_HOST` | _(empty/disabled)_ | MQTT Broker IP/hostname (enables MQTT when set) |
+| `MQTT_PORT` | `1883` | MQTT Broker port |
+| `MQTT_TOPIC` | `froniusalt/power` | MQTT topic for produced power (Watts) |
+| `MQTT_USERNAME` | _(empty)_ | MQTT username (optional) |
+| `MQTT_PASSWORD` | _(empty)_ | MQTT password (optional) |
+| `MQTT_CLIENT_ID` | `fronius2vim` | MQTT client ID |
+| `MQTT_RETAIN` | `false` | MQTT retain flag (`true` or `false`) |
+| `MQTT_QOS` | `0` | MQTT QoS level (0, 1, or 2) |
 
 ## API Endpoints
 

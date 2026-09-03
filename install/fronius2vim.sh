@@ -145,6 +145,9 @@ Environment=REALTIME_INTERVAL=10
 Environment=ENERGY_INTERVAL=900
 Environment=WEB_PORT=8080
 Environment=LOG_LEVEL=INFO
+# Environment=MQTT_HOST=172.20.204.22
+# Environment=MQTT_PORT=1883
+# Environment=MQTT_TOPIC=froniusalt/power
 Environment=PATH=/opt/fronius2vim/venv/bin
 ExecStart=/opt/fronius2vim/venv/bin/python main.py
 Restart=always

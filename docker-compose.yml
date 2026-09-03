@@ -13,6 +13,15 @@ services:
       - ENERGY_INTERVAL=900
       - WEB_PORT=8080
       - LOG_LEVEL=INFO
+      # MQTT Configuration (optional)
+      # - MQTT_HOST=172.20.204.22
+      # - MQTT_PORT=1883
+      # - MQTT_TOPIC=froniusalt/power
+      # - MQTT_USERNAME=
+      # - MQTT_PASSWORD=
+      # - MQTT_CLIENT_ID=fronius2vim
+      # - MQTT_RETAIN=false
+      # - MQTT_QOS=0
     networks:
       - fronius2vim-net
     labels:
