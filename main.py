@@ -215,6 +215,7 @@ class MqttPublisher:
         self.qos = qos
         self.retain = retain
         self.client: Optional[mqtt.Client] = None
+        self.connected: bool = False
 
         if not self.host:
             logger.info("MQTT publishing disabled (MQTT_HOST not set)")
@@ -248,11 +249,14 @@ class MqttPublisher:
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         rc_code = getattr(rc, "value", rc) if rc is not None else 0
         if rc_code == 0:
+            self.connected = True
             logger.info(f"Connected to MQTT broker at {self.host}:{self.port}")
         else:
+            self.connected = False
             logger.warning(f"Failed to connect to MQTT broker with return code: {rc}")
 
     def _on_disconnect(self, client, userdata, *args, **kwargs):
+        self.connected = False
         logger.warning(f"Disconnected from MQTT broker ({self.host}:{self.port})")
 
     def publish_power(self, power: float):
@@ -272,10 +276,21 @@ class MqttPublisher:
         """Stop MQTT loop and disconnect client"""
         if self.client:
             try:
+                self.connected = False
                 self.client.loop_stop()
                 self.client.disconnect()
             except Exception:
                 pass
+
+
+mqtt_publisher: Optional[MqttPublisher] = None
+
+
+def get_mqtt_status() -> str:
+    """Get current MQTT connection status ('connected', 'disconnected', 'disabled')"""
+    if not mqtt_publisher or not mqtt_publisher.host:
+        return "disabled"
+    return "connected" if mqtt_publisher.connected else "disconnected"
 
 
 async def realtime_collector(
@@ -374,6 +389,12 @@ HTML_DASHBOARD = """
             text-transform: uppercase;
         }
         
+        .status-group {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
         .status-badge {
             display: flex;
             align-items: center;
@@ -391,6 +412,11 @@ HTML_DASHBOARD = """
         
         .status-dot.connected {
             background: var(--evcc-dark-green);
+        }
+
+        .status-dot.disabled {
+            background: var(--bs-gray-medium);
+            opacity: 0.5;
         }
         
         /* Main Container */
@@ -578,9 +604,15 @@ HTML_DASHBOARD = """
 <body>
     <div class="top-bar">
         <div class="site-title">fronius2vim</div>
-        <div class="status-badge">
-            <span class="status-dot" id="statusDot"></span>
-            <span id="statusText">Connecting...</span>
+        <div class="status-group">
+            <div class="status-badge" id="mqttBadge" title="MQTT Broker Status">
+                <span class="status-dot disabled" id="mqttStatusDot"></span>
+                <span id="mqttStatusText">MQTT</span>
+            </div>
+            <div class="status-badge" id="wsBadge" title="Live Connection Status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Connecting...</span>
+            </div>
         </div>
     </div>
     
@@ -851,6 +883,25 @@ HTML_DASHBOARD = """
                 if (data.timestamp) {
                     document.getElementById('timestamp').textContent = data.timestamp;
                 }
+
+                // Update MQTT indicator
+                if (data.mqtt_status !== undefined) {
+                    const mqttDot = document.getElementById('mqttStatusDot');
+                    const mqttText = document.getElementById('mqttStatusText');
+                    if (data.mqtt_status === 'connected') {
+                        mqttDot.className = 'status-dot connected';
+                        mqttText.textContent = 'MQTT';
+                        mqttText.title = 'MQTT Connected';
+                    } else if (data.mqtt_status === 'disconnected') {
+                        mqttDot.className = 'status-dot';
+                        mqttText.textContent = 'MQTT';
+                        mqttText.title = 'MQTT Disconnected';
+                    } else {
+                        mqttDot.className = 'status-dot disabled';
+                        mqttText.textContent = 'MQTT (off)';
+                        mqttText.title = 'MQTT Disabled (MQTT_HOST not set)';
+                    }
+                }
                 
                 // Update metrics log display
                 if (data.metrics_log && data.metrics_log.length > 0) {
@@ -875,6 +926,7 @@ HTML_DASHBOARD = """
             ws.onclose = () => {
                 document.getElementById('statusText').textContent = 'Disconnected';
                 document.getElementById('statusDot').className = 'status-dot';
+                document.getElementById('mqttStatusDot').className = 'status-dot';
                 setTimeout(connect, 5000);
             };
             
@@ -899,7 +951,10 @@ async def dashboard():
 @app.get("/api/data")
 async def get_data():
     """REST API endpoint for current data"""
-    return latest_data
+    return {
+        **latest_data,
+        "mqtt_status": get_mqtt_status(),
+    }
 
 
 @app.get("/api/today")
@@ -1083,6 +1138,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "daily_energy": latest_data.get("daily_energy", 0),
                 "timestamp": latest_data.get("timestamp", ""),
                 "metrics_log": metrics_log,
+                "mqtt_status": get_mqtt_status(),
             }
             await websocket.send_json(data)
             await asyncio.sleep(REALTIME_INTERVAL)
@@ -1094,9 +1150,6 @@ async def websocket_endpoint(websocket: WebSocket):
 async def get_metrics_log():
     """Get recent metrics written to VictoriaMetrics"""
     return {"metrics": metrics_log}
-
-
-mqtt_publisher: Optional[MqttPublisher] = None
 
 
 @app.on_event("startup")
