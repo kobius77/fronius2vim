@@ -20,7 +20,7 @@ services:
       # - MQTT_USERNAME=
       # - MQTT_PASSWORD=
       # - MQTT_CLIENT_ID=fronius2vim
-      # - MQTT_RETAIN=false
+      # - MQTT_RETAIN=true
       # - MQTT_QOS=0
     networks:
       - fronius2vim-net
