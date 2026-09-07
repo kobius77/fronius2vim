@@ -2,6 +2,7 @@
 docker-compose.yml
 .env
 inverters.json
+fronius2vim-data/
 
 # Python
 __pycache__/

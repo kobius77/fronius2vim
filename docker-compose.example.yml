@@ -7,8 +7,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./inverters.json:/app/inverters.json
+      - ./fronius2vim-data:/app/data
     environment:
+      - INVERTERS_FILE=/app/data/inverters.json
       - FRONIUS_HOST=172.20.203.100
       - VICTORIAMETRICS_URL=http://172.20.204.22:8428
       - REALTIME_INTERVAL=10
