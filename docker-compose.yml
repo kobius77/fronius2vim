@@ -6,10 +6,6 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    cap_add:
-      - NET_RAW  # required for ARP scanning (inverter auto-failover)
-    volumes:
-      - ./fronius_host.txt:/app/.fronius_host
     environment:
       - FRONIUS_HOST=172.20.203.100
       - VICTORIAMETRICS_URL=http://172.20.204.22:8428
@@ -17,11 +13,6 @@ services:
       - ENERGY_INTERVAL=900
       - WEB_PORT=8080
       - LOG_LEVEL=INFO
-      # Inverter Auto-Failover Monitor
-      - MONITOR_ENABLED=true
-      - MONITOR_PRIMARY_SUBNET=172.20.203.0/24
-      - MONITOR_DISCOVERY_SUBNET=172.20.204.0/24
-      - MONITOR_FAIL_THRESHOLD=3
       # MQTT Configuration (optional)
       # - MQTT_HOST=172.20.204.22
       # - MQTT_PORT=1883

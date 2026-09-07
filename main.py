@@ -16,14 +16,6 @@ from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 
-from inverter_monitor import (
-    InverterMonitor,
-    MonitorState,
-    load_persisted_host,
-    default_env_path,
-    monitor_loop as inverter_monitor_loop,
-)
-
 # Configuration
 # Default IPs hardcoded for this deployment
 FRONIUS_HOST = os.getenv("FRONIUS_HOST", "172.20.203.100")
@@ -42,13 +34,6 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "").strip().strip("\"'")
 MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "fronius2vim").strip().strip("\"'")
 MQTT_RETAIN = os.getenv("MQTT_RETAIN", "true").strip().strip("\"'").lower() in ("true", "1", "yes")
 MQTT_QOS = int(os.getenv("MQTT_QOS", "0").strip().strip("\"'"))
-
-# Inverter Monitor Configuration
-MONITOR_ENABLED = os.getenv("MONITOR_ENABLED", "true").strip().strip("\"'").lower() in ("true", "1", "yes")
-MONITOR_PRIMARY_SUBNET = os.getenv("MONITOR_PRIMARY_SUBNET", "172.20.203.0/24").strip().strip("\"'")
-MONITOR_DISCOVERY_SUBNET = os.getenv("MONITOR_DISCOVERY_SUBNET", "172.20.204.0/24").strip().strip("\"'")
-MONITOR_FAIL_THRESHOLD = int(os.getenv("MONITOR_FAIL_THRESHOLD", "3").strip().strip("\"'"))
-MONITOR_ENV_FILE = os.getenv("MONITOR_ENV_FILE", "").strip().strip("\"'")
 
 # Setup logging
 logging.basicConfig(
@@ -119,13 +104,6 @@ class FroniusCollector:
         self.host = host
         self.base_url = f"http://{host}/solar_api/v1"
         self.client = httpx.AsyncClient(timeout=10.0)
-
-    async def set_host(self, new_host: str):
-        """Update the target inverter host at runtime (failover)."""
-        old = self.host
-        self.host = new_host
-        self.base_url = f"http://{new_host}/solar_api/v1"
-        logger.info(f"FroniusCollector target changed: {old} -> {new_host}")
 
     async def get_realtime_data(self) -> Optional[Dict]:
         """Get real-time inverter data (PAC power only)"""
@@ -346,8 +324,6 @@ class MqttPublisher:
 
 
 mqtt_publisher: Optional[MqttPublisher] = None
-inverter_monitor: Optional[InverterMonitor] = None
-collector: Optional[FroniusCollector] = None
 
 
 def get_mqtt_status() -> str:
@@ -1018,7 +994,6 @@ async def get_data():
     return {
         **latest_data,
         "mqtt_status": get_mqtt_status(),
-        "monitor": inverter_monitor.get_status() if inverter_monitor else None,
     }
 
 
@@ -1204,9 +1179,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 "timestamp": latest_data.get("timestamp", ""),
                 "metrics_log": metrics_log,
                 "mqtt_status": get_mqtt_status(),
-                "monitor_status": (
-                    inverter_monitor.get_status() if inverter_monitor else None
-                ),
             }
             await websocket.send_json(data)
             await asyncio.sleep(REALTIME_INTERVAL)
@@ -1223,18 +1195,8 @@ async def get_metrics_log():
 @app.on_event("startup")
 async def startup_event():
     """Start background collectors on app startup"""
-    global mqtt_publisher, collector, inverter_monitor
-
-    # Prefer a persisted failed-over host when the monitor is enabled
-    env_file = MONITOR_ENV_FILE or default_env_path()
-    initial_host = FRONIUS_HOST
-    if MONITOR_ENABLED:
-        persisted = load_persisted_host(env_file)
-        if persisted:
-            logger.info(f"Using persisted inverter host: {persisted}")
-            initial_host = persisted
-
-    collector = FroniusCollector(initial_host)
+    global mqtt_publisher
+    collector = FroniusCollector(FRONIUS_HOST)
     writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
     mqtt_publisher = MqttPublisher(
         host=MQTT_HOST,
@@ -1248,7 +1210,7 @@ async def startup_event():
     )
 
     logger.info("Starting fronius2vim")
-    logger.info(f"Fronius host: {initial_host}")
+    logger.info(f"Fronius host: {FRONIUS_HOST}")
     logger.info(f"VictoriaMetrics URL: {VICTORIAMETRICS_URL}")
     if MQTT_HOST:
         logger.info(f"MQTT broker: {MQTT_HOST}:{MQTT_PORT}, topic: {MQTT_TOPIC}")
@@ -1260,28 +1222,6 @@ async def startup_event():
     # Start background tasks
     asyncio.create_task(realtime_collector(collector, writer, mqtt_publisher))
     asyncio.create_task(energy_collector(collector, writer))
-
-    # Start inverter monitor (auto-failover)
-    if MONITOR_ENABLED:
-        inverter_monitor = InverterMonitor(
-            primary_subnet=MONITOR_PRIMARY_SUBNET,
-            discovery_subnet=MONITOR_DISCOVERY_SUBNET,
-            fail_threshold=MONITOR_FAIL_THRESHOLD,
-        )
-        logger.info(
-            f"Inverter monitor enabled: primary={MONITOR_PRIMARY_SUBNET}, "
-            f"discovery={MONITOR_DISCOVERY_SUBNET}, fail_threshold={MONITOR_FAIL_THRESHOLD}"
-        )
-        asyncio.create_task(
-            inverter_monitor_loop(
-                inverter_monitor,
-                get_current_host=lambda: collector.host,
-                set_current_host=collector.set_host,
-                env_path=env_file,
-            )
-        )
-    else:
-        logger.info("Inverter monitor disabled (MONITOR_ENABLED=false)")
 
 
 @app.on_event("shutdown")
