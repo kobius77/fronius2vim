@@ -589,6 +589,7 @@ HTML_ADMIN = """
         .btn{border:none;border-radius:6px;padding:6px 14px;font-size:.8rem;cursor:pointer;font-weight:500}
         .btn-del{background:#fee;color:#e11d48}.btn-del:hover{background:#fdd}
         .btn-save{background:#e8fde8;color:#16a34a}.btn-save:hover{background:#d4f5d4}
+        .btn-edit{background:#eee;color:#374151}.btn-edit:hover{background:#e5e7eb}
         .form-card{background:#fff;border-radius:12px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:24px}
         .form-card h2{font-size:.875rem;font-weight:600;margin-bottom:16px}
         .field{margin-bottom:12px}
@@ -607,18 +608,24 @@ HTML_ADMIN = """
         <tbody id="invTable"></tbody>
     </table>
     <div class="form-card">
-        <h2>Add Inverter</h2>
+        <h2 id="formTitle">Add Inverter</h2>
         <div class="field"><label>Name</label><input id="fName" placeholder="e.g. Verto1-37123716"></div>
         <div class="field"><label>IP Address</label><input id="fHost" placeholder="e.g. 172.20.204.102"></div>
         <div class="field"><label>Publish to MQTT</label><select id="fMqtt"><option value="false">No</option><option value="true">Yes</option></select></div>
-        <div class="actions"><button class="btn btn-save" onclick="addInverter()">Add Inverter</button></div>
+        <div class="actions"><button class="btn btn-save" id="saveLabel" onclick="addInverter()">Add Inverter</button> <button class="btn btn-edit" id="cancelBtn" style="display:none" onclick="cancelEdit()">Cancel</button></div>
     </div>
 </div>
 <script>
 let inverters=[];
 async function load(){const r=await fetch('/api/inverters');inverters=await r.json();render()}
-function render(){document.getElementById('invTable').innerHTML=inverters.map((inv,i)=>{const st=inv.online?'on':(inv.host?'off':'na');const stl=inv.online?'Online':(inv.host?'Offline':'?');return `<tr><td><strong>${inv.name}</strong></td><td>${inv.host}</td><td>${inv.mqtt_enabled?'<span style="color:#16a34a">Yes</span>':'<span style="color:#93949e">No</span>'}</td><td><span class="dot ${st}"></span>${stl}</td><td><button class="btn btn-del" onclick="delInverter(${i})">Remove</button></td></tr>`}).join('')}
-async function addInverter(){const n=document.getElementById('fName').value.trim();const h=document.getElementById('fHost').value.trim();const m=document.getElementById('fMqtt').value==='true';if(!n||!h)return alert('Name and IP required');await fetch('/api/inverters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m})});document.getElementById('fName').value='';document.getElementById('fHost').value='';load()}
+function render(){document.getElementById('invTable').innerHTML=inverters.map((inv,i)=>{const st=inv.online?'on':(inv.host?'off':'na');const stl=inv.online?'Online':(inv.host?'Offline':'?');return `<tr><td><strong>${inv.name}</strong></td><td>${inv.host}</td><td>${inv.mqtt_enabled?'<span style="color:#16a34a">Yes</span>':'<span style="color:#93949e">No</span>'}</td><td><span class="dot ${st}"></span>${stl}</td><td><button class="btn btn-edit" onclick="editInverter(${i})">Edit</button> <button class="btn btn-del" onclick="delInverter(${i})">Remove</button></td></tr>`}).join('')}
+let editingIdx=null;
+function editInverter(i){editingIdx=i;const inv=inverters[i];document.getElementById('fName').value=inv.name;document.getElementById('fHost').value=inv.host;document.getElementById('fMqtt').value=inv.mqtt_enabled?'true':'false';document.getElementById('formTitle').textContent='Edit Inverter';document.getElementById('saveLabel').textContent='Save Changes';document.getElementById('cancelBtn').style.display='inline-block';window.scrollTo({top:0,behavior:'smooth'})}
+function cancelEdit(){editingIdx=null;document.getElementById('fName').value='';document.getElementById('fHost').value='';document.getElementById('formTitle').textContent='Add Inverter';document.getElementById('saveLabel').textContent='Add Inverter';document.getElementById('cancelBtn').style.display='none'}
+async function addInverter(){const n=document.getElementById('fName').value.trim();const h=document.getElementById('fHost').value.trim();const m=document.getElementById('fMqtt').value==='true';if(!n||!h)return alert('Name and IP required');
+  if(editingIdx!==null){await fetch('/api/inverters/'+encodeURIComponent(inverters[editingIdx].name),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m})});editingIdx=null}
+  else{await fetch('/api/inverters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m})})}
+  cancelEdit();load()}
 async function delInverter(i){if(!confirm('Remove '+inverters[i].name+'?'))return;await fetch('/api/inverters/'+encodeURIComponent(inverters[i].name),{method:'DELETE'});load()}
 load();setInterval(load,5000);
 </script>
@@ -710,8 +717,10 @@ async def update_inverter(name: str, body: dict):
 
         if "mqtt_enabled" in body:
             target.mqtt_enabled = body["mqtt_enabled"]
-        if "host" in body:
+        if "host" in body and body["host"]:
             target.host = body["host"]
+        if "name" in body and body["name"].strip():
+            target.name = body["name"].strip()
 
         save_inverters(configs)
         stop_inverter_tasks(name)
