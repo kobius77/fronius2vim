@@ -509,10 +509,7 @@ HTML_DASHBOARD = """
                 <div class="chart-title">Energy Generation Today</div>
                 <span class="timestamp" id="timestamp">--</span>
             </div>
-            <div class="legend">
-                <div class="legend-item"><div class="legend-color" style="background:rgba(15,222,65,.8)"></div><span>Energy (kWh)</span></div>
-                <div class="legend-item"><div class="legend-color" style="background:#faf000"></div><span>Power (kW)</span></div>
-            </div>
+            <div class="legend" id="todayLegend"></div>
             <canvas id="combinedChart"></canvas>
         </div>
         <div class="chart-card">
@@ -528,22 +525,19 @@ HTML_DASHBOARD = """
     <script>
         const ctx = document.getElementById('combinedChart').getContext('2d');
         const combinedChart = new Chart(ctx, {
-            type: 'bar',
-            data: {labels:[], datasets:[
-                {label:'Energy',data:[],backgroundColor:'rgba(15,222,65,.8)',borderWidth:0,borderRadius:3,yAxisID:'y',order:2,barPercentage:1,categoryPercentage:3.8},
-                {type:'line',borderColor:'#faf000',backgroundColor:'rgba(250,240,0,.1)',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1}
-            ]},
-            options:{responsive:true,maintainAspectRatio:true,interaction:{mode:'index',intersect:false},scales:{y:{type:'linear',position:'left',beginAtZero:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#6b7280',font:{size:11}}},y1:{type:'linear',position:'right',beginAtZero:true,max:35,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}},x:{grid:{display:false},ticks:{color:'#6b7280',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12}}},plugins:{legend:{display:false}}}
+            data:{labels:[],datasets:[]},
+            options:{responsive:true,maintainAspectRatio:true,interaction:{mode:'index',intersect:false},scales:{y:{type:'linear',position:'left',beginAtZero:true,stacked:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#6b7280',font:{size:11}}},y1:{type:'linear',position:'right',beginAtZero:true,max:35,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}},x:{stacked:true,grid:{display:false},ticks:{color:'#6b7280',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12}}},plugins:{legend:{display:false}}}
         });
-        async function fetchCombinedData(){try{const r=await fetch('/api/today');const d=await r.json();if(d.points&&d.points.length){combinedChart.data.labels=d.points.map(p=>p.time);combinedChart.data.datasets[0].data=d.points.map(p=>p.kwh);combinedChart.data.datasets[1].data=d.points.map(p=>p.power/1000);combinedChart.update()}}catch(e){}}
+        const PALETTE=['#0fde41','#faf000','#0ea5e9','#f97316','#a855f7','#ef4444','#14b8a6','#84cc16'];
+        async function fetchCombinedData(){try{const r=await fetch('/api/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:3,stack:'e'});combinedChart.data.datasets.push({type:'line',label:s.name+' (power)',data:s.power_kw,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1'})});combinedChart.update();document.getElementById('todayLegend').innerHTML=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchCombinedData();setInterval(fetchCombinedData,300000);
 
         const sCtx = document.getElementById('sevenDayChart').getContext('2d');
         const sevenDayChart = new Chart(sCtx, {
-            type:'bar',data:{labels:[],datasets:[{label:'Energy',data:[],backgroundColor:'rgba(15,222,65,.8)',borderWidth:0,borderRadius:4}]},
-            options:{responsive:true,maintainAspectRatio:true,scales:{y:{beginAtZero:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#93949e',font:{size:11}}},x:{grid:{display:false},ticks:{color:'#93949e',font:{size:11}}}},plugins:{legend:{display:false}}}
+            type:'bar',data:{labels:[],datasets:[]},
+            options:{responsive:true,maintainAspectRatio:true,scales:{y:{beginAtZero:true,stacked:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#93949e',font:{size:11}}},x:{stacked:true,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}}},plugins:{legend:{display:false}}}
         });
-        async function fetchSevenDay(){try{const r=await fetch('/api/history/7days');const d=await r.json();if(d.days&&d.days.length){sevenDayChart.data.labels=d.days.map(d=>d.date);sevenDayChart.data.datasets[0].data=d.days.map(d=>d.kwh);sevenDayChart.update()}}catch(e){}}
+        async function fetchSevenDay(){try{const r=await fetch('/api/history/7days');const d=await r.json();if(d.days&&d.days.length&&d.series&&d.series.length){sevenDayChart.data.labels=d.days;sevenDayChart.data.datasets=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return {label:s.name,data:s.kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:4,stack:'es'}});sevenDayChart.update()}}catch(e){}}
         fetchSevenDay();setInterval(fetchSevenDay,3600000);
 
         let ws;
@@ -749,33 +743,59 @@ async def get_today():
             p_res.raise_for_status()
             e_data, p_data = e_res.json(), p_res.json()
 
-        e_points_15m = {}
-        if e_data.get("status") == "success" and e_data.get("data", {}).get("result"):
-            values = e_data["data"]["result"][0].get("values", [])
-            for i in range(1, len(values)):
-                ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
-                kwh = (curr - prev) / 1000
-                if kwh >= 0:
-                    e_points_15m[ts] = kwh
+        e_series = {}
+        if e_data.get("status") == "success":
+            for result in e_data.get("data", {}).get("result", []):
+                name = (result.get("metric") or {}).get("inverter", "unknown")
+                values = result.get("values", [])
+                per15 = {}
+                for i in range(1, len(values)):
+                    ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
+                    kwh = (curr - prev) / 1000
+                    if kwh >= 0:
+                        per15[ts] = kwh
+                if per15:
+                    e_series[name] = per15
 
-        p_points = {}
-        if p_data.get("status") == "success" and p_data.get("data", {}).get("result"):
-            for v in p_data["data"]["result"][0].get("values", []):
-                p_points[int(v[0])] = round(float(v[1]), 0)
+        p_series = {}
+        if p_data.get("status") == "success":
+            for result in p_data.get("data", {}).get("result", []):
+                name = (result.get("metric") or {}).get("inverter", "unknown")
+                pts = {}
+                for v in result.get("values", []):
+                    pts[int(v[0])] = round(float(v[1]), 0)
+                if pts:
+                    p_series[name] = pts
 
-        all_ts = sorted(set(e_points_15m.keys()) | set(p_points.keys()))
-        hourly, cur = {}, 0.0
-        for ts in all_ts:
-            cur += e_points_15m.get(ts, 0.0)
-            if datetime.fromtimestamp(ts).minute == 0:
-                hourly[ts - 1800] = round(cur, 2)
-                cur = 0.0
+        names = sorted(set(e_series.keys()) | set(p_series.keys()))
+        all_ts_set = set()
+        for d in e_series.values():
+            all_ts_set.update(d)
+        for d in p_series.values():
+            all_ts_set.update(d)
+        all_ts = sorted(all_ts_set)
 
-        points = [{"time": datetime.fromtimestamp(ts).strftime("%H:%M"), "kwh": hourly.get(ts), "power": p_points.get(ts, 0.0)} for ts in all_ts]
-        return {"points": points}
+        series_out = []
+        for name in names:
+            per15 = e_series.get(name, {})
+            ppts = p_series.get(name, {})
+            hourly, cur = {}, 0.0
+            for ts in all_ts:
+                cur += per15.get(ts, 0.0)
+                if datetime.fromtimestamp(ts).minute == 0:
+                    hourly[ts - 1800] = round(cur, 2)
+                    cur = 0.0
+            series_out.append({
+                "name": name,
+                "energy_kwh": [hourly.get(ts) for ts in all_ts],
+                "power_kw": [round(ppts.get(ts, 0.0) / 1000, 2) for ts in all_ts],
+            })
+
+        times = [datetime.fromtimestamp(ts).strftime("%H:%M") for ts in all_ts]
+        return {"times": times, "series": series_out}
     except Exception as e:
         logger.error(f"Failed to fetch today data: {e}")
-        return {"points": [], "error": str(e)}
+        return {"times": [], "series": [], "error": str(e)}
 
 
 @app.get("/api/history/7days")
@@ -785,7 +805,7 @@ async def get_7day_history():
         days_list = []
         for i in range(6, -1, -1):
             day = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
-            days_list.append({"date": day.strftime("%a %d"), "kwh": 0.0, "start_ts": int(day.timestamp())})
+            days_list.append({"date": day.strftime("%a %d"), "start_ts": int(day.timestamp())})
 
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {"query": "fronius_daily_energy_watthours", "start": days_list[0]["start_ts"], "end": int(now.timestamp()), "step": "15m"}
@@ -795,26 +815,31 @@ async def get_7day_history():
             resp.raise_for_status()
             data = resp.json()
 
-        values_by_date = {}
-        if data.get("status") == "success" and data.get("data", {}).get("result"):
-            for result in data["data"]["result"]:
+        per_inverter = {}
+        if data.get("status") == "success":
+            for result in data.get("data", {}).get("result", []):
+                name = (result.get("metric") or {}).get("inverter", "unknown")
+                by_day = {}
                 for v in result.get("values", []):
                     ts, wh = int(v[0]), float(v[1])
                     day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-                    day_label = datetime.fromtimestamp(ts).strftime("%a %d")
-                    if day_key not in values_by_date or wh / 1000 > values_by_date[day_key]["kwh"]:
-                        values_by_date[day_key] = {"kwh": wh / 1000, "label": day_label}
+                    by_day[day_key] = max(by_day.get(day_key, 0.0), wh)
+                if by_day:
+                    per_inverter[name] = by_day
 
-        for day in days_list:
-            for dd in values_by_date.values():
-                if dd["label"] == day["date"]:
-                    day["kwh"] = round(dd["kwh"], 2)
-                    break
+        labels = [d["date"] for d in days_list]
+        series_out = []
+        for name, by_day in per_inverter.items():
+            kwhs = []
+            for d in days_list:
+                day_key = datetime.fromtimestamp(d["start_ts"]).strftime("%Y-%m-%d")
+                kwhs.append(round(by_day.get(day_key, 0.0) / 1000, 2))
+            series_out.append({"name": name, "kwh": kwhs})
 
-        return {"days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list]}
+        return {"days": labels, "series": series_out}
     except Exception as e:
         logger.error(f"Failed to fetch 7-day history: {e}")
-        return {"days": [], "error": str(e)}
+        return {"days": [], "series": [], "error": str(e)}
 
 
 @app.get("/api/metrics-log")
