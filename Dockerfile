@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY main.py .
+COPY inverter_monitor.py .
 
 # Expose web UI port
 EXPOSE 8080

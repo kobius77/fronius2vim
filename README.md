@@ -9,6 +9,7 @@ A Python-based tool that polls real-time metrics and energy counters from a Fron
 - **VictoriaMetrics Integration**: Native Prometheus line protocol export for power and daily/yearly/total energy metrics.
 - **Web Dashboard**: Modern, responsive dark-themed dashboard with live WebSocket updates, today's generation vs. power chart, 7-day historical summary, and real-time VictoriaMetrics & MQTT connection indicators.
 - **Broad Fronius Inverter Compatibility**: Supports Fronius Symo, Primo, SnapINverter, and Generation 24 / Tauro inverters with robust handling of standby/night mode.
+- **Automatic Inverter Failover**: On startup scans a secondary subnet and notes all live hosts. If the inverter goes offline (e.g. moved to a new IP/subnet), the monitor ARP-scans the discovery subnet, finds the Fronius device via its Solar API, switches the collector to it, and persists the new host for future restarts.
 - **Docker Support & Auto-Updates**: Simple `docker compose` setup with Watchtower support for automatic container redeployment on new git releases.
 
 ## Architecture
@@ -55,6 +56,10 @@ A Python-based tool that polls real-time metrics and energy counters from a Fron
 ```bash
 git clone https://github.com/kobius77/fronius2vim
 cd fronius2vim
+
+# Create your local compose file from the example (docker-compose.yml is gitignored)
+cp docker-compose.example.yml docker-compose.yml
+
 docker compose up -d
 ```
 
@@ -97,6 +102,11 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 | `MQTT_CLIENT_ID` | `fronius2vim` | MQTT client identifier |
 | `MQTT_RETAIN` | `true` | Retain flag for published MQTT messages (`true`/`false`) |
 | `MQTT_QOS` | `0` | MQTT QoS level (0, 1, or 2) |
+| `MONITOR_ENABLED` | `true` | Enable automatic inverter failover monitoring |
+| `MONITOR_PRIMARY_SUBNET` | `172.20.203.0/24` | Subnet where the inverter normally lives |
+| `MONITOR_DISCOVERY_SUBNET` | `172.20.204.0/24` | Subnet scanned for the inverter if it goes offline |
+| `MONITOR_FAIL_THRESHOLD` | `3` | Consecutive API failures before triggering a discovery scan |
+| `MONITOR_ENV_FILE` | _(auto)_ | File where the failed-over host is persisted |
 
 ---
 

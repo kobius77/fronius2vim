@@ -1,0 +1,2 @@
+# Persisted inverter host written by the auto-failover monitor.
+# Contents are updated automatically when the inverter is found on a new subnet.
