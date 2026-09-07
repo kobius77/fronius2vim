@@ -55,6 +55,10 @@ A Python-based tool that polls real-time metrics and energy counters from a Fron
 ```bash
 git clone https://github.com/kobius77/fronius2vim
 cd fronius2vim
+
+# Create your local compose file (docker-compose.yml is gitignored, so edits survive pulls)
+cp docker-compose.example.yml docker-compose.yml
+
 docker compose up -d
 ```
 

@@ -49,6 +49,7 @@ app = FastAPI(title="fronius2vim", version="1.0.0")
 latest_data: Dict[str, Any] = {
     "power": 0,
     "daily_energy": 0,
+    "inverter_online": False,
 }
 
 # Log of recent metrics written to VictoriaMetrics (for dashboard)
@@ -348,8 +349,15 @@ async def realtime_collector(
                     mqtt_publisher.publish_power(data["power"])
                 # Update cache for WebSocket
                 latest_data["power"] = data["power"]
+                latest_data["inverter_online"] = True
                 latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 logger.info(f"Realtime data: Power={data['power']}W")
+            else:
+                # Inverter unreachable: flag it and publish 0 so consumers see standby
+                latest_data["inverter_online"] = False
+                if mqtt_publisher:
+                    mqtt_publisher.publish_power(0.0)
+                logger.warning("Inverter not reachable - publishing 0 to MQTT")
         except Exception as e:
             logger.error(f"Error in realtime collector: {e}")
 
@@ -645,6 +653,10 @@ HTML_DASHBOARD = """
     <div class="top-bar">
         <div class="site-title">fronius2vim</div>
         <div class="status-group">
+            <div class="status-badge" id="inverterBadge" title="Inverter Status">
+                <span class="status-dot disabled" id="inverterStatusDot"></span>
+                <span id="inverterStatusText">Inverter</span>
+            </div>
             <div class="status-badge" id="mqttBadge" title="MQTT Broker Status">
                 <span class="status-dot disabled" id="mqttStatusDot"></span>
                 <span id="mqttStatusText">MQTT</span>
@@ -924,6 +936,21 @@ HTML_DASHBOARD = """
                     document.getElementById('timestamp').textContent = data.timestamp;
                 }
 
+                // Update Inverter indicator
+                if (data.inverter_online !== undefined) {
+                    const invDot = document.getElementById('inverterStatusDot');
+                    const invText = document.getElementById('inverterStatusText');
+                    if (data.inverter_online) {
+                        invDot.className = 'status-dot connected';
+                        invText.textContent = 'Inverter';
+                        invText.title = 'Inverter Online';
+                    } else {
+                        invDot.className = 'status-dot';
+                        invText.textContent = 'Inverter';
+                        invText.title = 'Inverter Offline';
+                    }
+                }
+
                 // Update MQTT indicator
                 if (data.mqtt_status !== undefined) {
                     const mqttDot = document.getElementById('mqttStatusDot');
@@ -1176,6 +1203,7 @@ async def websocket_endpoint(websocket: WebSocket):
             data = {
                 "power": latest_data.get("power", 0),
                 "daily_energy": latest_data.get("daily_energy", 0),
+                "inverter_online": latest_data.get("inverter_online", False),
                 "timestamp": latest_data.get("timestamp", ""),
                 "metrics_log": metrics_log,
                 "mqtt_status": get_mqtt_status(),
