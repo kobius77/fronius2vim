@@ -44,6 +44,8 @@ MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power").strip().strip("\"'")
 
 # Inverters persistence
 # Path is overridable (e.g. mount to a volume). Defaults to next to main.py.
+# Container default via docker-compose.example.yml: /app/data/inverters.json
+# (mounted from ./fronius2vim-data on the host, survives container redeploys).
 INVERTERS_FILE = os.getenv(
     "INVERTERS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "inverters.json"),
