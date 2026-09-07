@@ -405,7 +405,10 @@ HTML_DASHBOARD = """
         .status-dot.connected{background:var(--green)}
         .status-dot.disabled{background:var(--muted);opacity:.5}
         .container{max-width:900px;margin:0 auto;padding:24px}
-        .inv-card{background:var(--card);border-radius:16px;padding:20px 24px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;align-items:center}
+        .inv-card{background:var(--card);border-radius:16px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;align-items:center}
+        #inverterCards{display:grid;gap:16px;margin-bottom:24px}
+        #inverterCards:has(.inv-card:nth-child(2)){grid-template-columns:repeat(2,1fr)}
+        @media(max-width:640px){#inverterCards:has(.inv-card:nth-child(2)){grid-template-columns:1fr}}
         .inv-name{font-weight:600;font-size:1rem}
         .inv-status{display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted)}
         .inv-metrics{display:flex;gap:32px}
