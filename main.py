@@ -850,6 +850,7 @@ async def startup_event():
     configs = load_inverters()
 
     logger.info("Starting fronius2vim")
+    logger.info(f"Inverter config file: {INVERTERS_FILE}")
     logger.info(f"VictoriaMetrics URL: {VICTORIAMETRICS_URL}")
     logger.info(f"Realtime interval: {REALTIME_INTERVAL}s  |  Energy interval: {ENERGY_INTERVAL}s")
     if MQTT_HOST:
