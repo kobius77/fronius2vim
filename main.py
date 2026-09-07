@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
 fronius2vim - Fronius Inverter to VictoriaMetrics Collector
-Polls Fronius Solar API and writes metrics to VictoriaMetrics
+Multi-inverter support with per-inverter MQTT toggles
 """
 
 import asyncio
+import json
 import logging
 import os
+import re
+import threading
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -16,49 +20,92 @@ from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 
-# Configuration
-# Default IPs hardcoded for this deployment
-FRONIUS_HOST = os.getenv("FRONIUS_HOST", "172.20.203.100")
+# ---------------------------------------------------------------------------
+# Configuration (env vars)
+# ---------------------------------------------------------------------------
 VICTORIAMETRICS_URL = os.getenv("VICTORIAMETRICS_URL", "http://172.20.204.22:8428")
 REALTIME_INTERVAL = int(os.getenv("REALTIME_INTERVAL", "10"))
 ENERGY_INTERVAL = int(os.getenv("ENERGY_INTERVAL", "900"))
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# MQTT Configuration
+# MQTT global config (broker connection params)
 MQTT_HOST = os.getenv("MQTT_HOST", "").strip().strip("\"'")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883").strip().strip("\"'"))
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power").strip().strip("\"'")
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "").strip().strip("\"'")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "").strip().strip("\"'")
-MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "fronius2vim").strip().strip("\"'")
 MQTT_RETAIN = os.getenv("MQTT_RETAIN", "true").strip().strip("\"'").lower() in ("true", "1", "yes")
 MQTT_QOS = int(os.getenv("MQTT_QOS", "0").strip().strip("\"'"))
 
-# Setup logging
+# Legacy single-inverter env var (used as seed on first boot)
+FRONIUS_HOST = os.getenv("FRONIUS_HOST", "172.20.203.100")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power").strip().strip("\"'")
+
+# Inverters persistence
+INVERTERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inverters.json")
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper()),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("fronius2vim")
 
-# FastAPI app
-app = FastAPI(title="fronius2vim", version="1.0.0")
+# ---------------------------------------------------------------------------
+# FastAPI
+# ---------------------------------------------------------------------------
+app = FastAPI(title="fronius2vim", version="2.0.0")
 
-# Latest data cache for WebSocket
-latest_data: Dict[str, Any] = {
-    "power": 0,
-    "daily_energy": 0,
-    "inverter_online": False,
-}
+# ---------------------------------------------------------------------------
+# Inverter config
+# ---------------------------------------------------------------------------
+@dataclass
+class InverterConfig:
+    name: str
+    host: str
+    mqtt_enabled: bool = False
+    mqtt_topic: str = ""
 
-# Log of recent metrics written to VictoriaMetrics (for dashboard)
-metrics_log: list = []
-MAX_LOG_ENTRIES = 50
+    def __post_init__(self):
+        if not self.mqtt_topic:
+            slug = re.sub(r"[^a-z0-9]+", "-", self.name.lower()).strip("-")
+            self.mqtt_topic = f"froniusalt/{slug}/power"
 
 
+def load_inverters() -> List[InverterConfig]:
+    """Load inverters from JSON file, or seed from env vars on first boot."""
+    if os.path.exists(INVERTERS_FILE):
+        try:
+            with open(INVERTERS_FILE, "r") as f:
+                data = json.load(f)
+            return [InverterConfig(**item) for item in data]
+        except Exception as e:
+            logger.error(f"Failed to load {INVERTERS_FILE}: {e}")
+
+    # First boot: seed from legacy FRONIUS_HOST
+    seed = [InverterConfig(name="Fronius", host=FRONIUS_HOST, mqtt_enabled=bool(MQTT_HOST), mqtt_topic=MQTT_TOPIC)]
+    save_inverters(seed)
+    logger.info(f"Created {INVERTERS_FILE} from env vars")
+    return seed
+
+
+def save_inverters(configs: List[InverterConfig]):
+    """Persist inverter list to JSON file."""
+    try:
+        with open(INVERTERS_FILE, "w") as f:
+            json.dump([asdict(c) for c in configs], f, indent=2)
+        logger.debug(f"Saved {len(configs)} inverters to {INVERTERS_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to save inverters: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Metric extraction (unchanged)
+# ---------------------------------------------------------------------------
 def extract_metric_value(metric_data: Any) -> float:
-    """Safely extract numeric metric values from all Fronius Solar API formats (SnapINverter, Symo, Gen24)"""
+    """Safely extract numeric metric values from all Fronius Solar API formats"""
     if not metric_data:
         return 0.0
     if isinstance(metric_data, (int, float)):
@@ -66,7 +113,6 @@ def extract_metric_value(metric_data: Any) -> float:
     if not isinstance(metric_data, dict):
         return 0.0
 
-    # 1. Check "Values" dictionary (Scope=System / standard)
     values = metric_data.get("Values")
     if isinstance(values, dict):
         total = 0.0
@@ -78,7 +124,6 @@ def extract_metric_value(metric_data: Any) -> float:
                     pass
         return total
 
-    # 2. Check "Value" field (Scope=Device, Gen24 Scope=System, or direct value)
     value = metric_data.get("Value")
     if isinstance(value, dict):
         total = 0.0
@@ -98,149 +143,86 @@ def extract_metric_value(metric_data: Any) -> float:
     return 0.0
 
 
+# ---------------------------------------------------------------------------
+# FroniusCollector (unchanged)
+# ---------------------------------------------------------------------------
 class FroniusCollector:
-    """Collects data from Fronius inverter API"""
-
     def __init__(self, host: str):
         self.host = host
         self.base_url = f"http://{host}/solar_api/v1"
         self.client = httpx.AsyncClient(timeout=10.0)
 
     async def get_realtime_data(self) -> Optional[Dict]:
-        """Get real-time inverter data (PAC power only)"""
         url = f"{self.base_url}/GetInverterRealtimeData.cgi"
         params = {"Scope": "System", "DataCollection": "CumulationInverterData"}
-
         try:
             response = await self.client.get(url, params=params)
             response.raise_for_status()
-            data = response.json()
-
-            body = data.get("Body", {}).get("Data", {})
-
-            return {
-                "power": extract_metric_value(body.get("PAC")),
-            }
+            body = response.json().get("Body", {}).get("Data", {})
+            return {"power": extract_metric_value(body.get("PAC"))}
         except Exception as e:
-            logger.error(f"Failed to get realtime data: {e}")
+            logger.error(f"[{self.host}] Failed to get realtime data: {e}")
             return None
 
     async def get_energy_data(self) -> Optional[Dict]:
-        """Get energy counters (DAY, YEAR, TOTAL)"""
         url = f"{self.base_url}/GetInverterRealtimeData.cgi"
         params = {"Scope": "System", "DataCollection": "CumulationInverterData"}
-
         try:
             response = await self.client.get(url, params=params)
             response.raise_for_status()
-            data = response.json()
-
-            body = data.get("Body", {}).get("Data", {})
-
+            body = response.json().get("Body", {}).get("Data", {})
             return {
                 "daily": extract_metric_value(body.get("DAY_ENERGY")),
                 "yearly": extract_metric_value(body.get("YEAR_ENERGY")),
                 "total": extract_metric_value(body.get("TOTAL_ENERGY")),
             }
         except Exception as e:
-            logger.error(f"Failed to get energy data: {e}")
+            logger.error(f"[{self.host}] Failed to get energy data: {e}")
             return None
 
 
+# ---------------------------------------------------------------------------
+# VictoriaMetricsWriter (unchanged except inverter label)
+# ---------------------------------------------------------------------------
 class VictoriaMetricsWriter:
-    """Writes metrics to VictoriaMetrics using Prometheus remote write"""
-
     def __init__(self, url: str):
         self.url = url.rstrip("/")
         self.client = httpx.AsyncClient(timeout=10.0)
 
-    async def write_metric(
-        self, name: str, value: float, labels: Optional[Dict[str, str]] = None
-    ):
-        """Write a single metric to VictoriaMetrics"""
+    async def write_metric(self, name: str, value: float, labels: Optional[Dict[str, str]] = None):
         global metrics_log
         if labels is None:
             labels = {}
 
-        # Build Prometheus format: metric_name{label1="value1"} value timestamp
         label_str = ",".join([f'{k}="{v}"' for k, v in labels.items()])
-        if label_str:
-            metric_line = f"{name}{{{label_str}}} {value}"
-        else:
-            metric_line = f"{name} {value}"
-
-        import_url = f"{self.url}/api/v1/import/prometheus"
+        metric_line = f"{name}{{{label_str}}} {value}" if label_str else f"{name} {value}"
 
         try:
-            response = await self.client.post(
-                import_url,
+            resp = await self.client.post(
+                f"{self.url}/api/v1/import/prometheus",
                 content=metric_line.encode(),
                 headers={"Content-Type": "text/plain"},
             )
-            response.raise_for_status()
-
-            # Log to dashboard metrics log
-            entry = {
-                "timestamp": datetime.utcnow().strftime("%H:%M:%S"),
-                "metric": name,
-                "value": value,
-                "labels": labels,
-                "status": "success",
-            }
+            resp.raise_for_status()
+            entry = {"timestamp": datetime.utcnow().strftime("%H:%M:%S"), "metric": name, "value": value, "labels": labels, "status": "success"}
             metrics_log.insert(0, entry)
             if len(metrics_log) > MAX_LOG_ENTRIES:
                 metrics_log = metrics_log[:MAX_LOG_ENTRIES]
-
-            logger.debug(f"Wrote metric: {metric_line}")
         except Exception as e:
-            # Log failure
-            entry = {
-                "timestamp": datetime.utcnow().strftime("%H:%M:%S"),
-                "metric": name,
-                "value": value,
-                "labels": labels,
-                "status": "error",
-                "error": str(e),
-            }
+            entry = {"timestamp": datetime.utcnow().strftime("%H:%M:%S"), "metric": name, "value": value, "labels": labels, "status": "error", "error": str(e)}
             metrics_log.insert(0, entry)
             if len(metrics_log) > MAX_LOG_ENTRIES:
                 metrics_log = metrics_log[:MAX_LOG_ENTRIES]
-
-            logger.error(f"Failed to write metric to VictoriaMetrics: {e}")
-
-    async def write_realtime_metrics(self, data: Dict):
-        """Write real-time metrics"""
-        await self.write_metric(
-            "fronius_power_watts", data["power"], {"inverter": "system"}
-        )
-
-    async def write_energy_metrics(self, data: Dict):
-        """Write energy counter metrics"""
-        await self.write_metric(
-            "fronius_daily_energy_watthours", data["daily"], {"inverter": "system"}
-        )
-        await self.write_metric(
-            "fronius_yearly_energy_watthours", data["yearly"], {"inverter": "system"}
-        )
-        await self.write_metric(
-            "fronius_total_energy_watthours", data["total"], {"inverter": "system"}
-        )
+            logger.error(f"Failed to write metric: {e}")
 
 
+# ---------------------------------------------------------------------------
+# MqttPublisher (unchanged)
+# ---------------------------------------------------------------------------
 class MqttPublisher:
-    """Publishes inverter metrics to MQTT broker"""
-
-    def __init__(
-        self,
-        host: str,
-        port: int = 1883,
-        topic: str = "froniusalt/power",
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        client_id: str = "fronius2vim",
-        qos: int = 0,
-        retain: bool = True,
-    ):
+    def __init__(self, host: str, port: int = 1883, topic: str = "froniusalt/power",
+                 username: Optional[str] = None, password: Optional[str] = None,
+                 client_id: str = "fronius2vim", qos: int = 0, retain: bool = True):
         self.host = host.strip().strip("\"'") if host else ""
         self.port = port
         self.topic = topic.strip().strip("\"'") if topic else "froniusalt/power"
@@ -250,14 +232,11 @@ class MqttPublisher:
         self.connected: bool = False
 
         if not self.host:
-            logger.info("MQTT publishing disabled (MQTT_HOST not set)")
             return
 
         try:
             if hasattr(mqtt, "CallbackAPIVersion"):
-                self.client = mqtt.Client(
-                    mqtt.CallbackAPIVersion.VERSION2, client_id=client_id
-                )
+                self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
             else:
                 self.client = mqtt.Client(client_id=client_id)
 
@@ -269,52 +248,38 @@ class MqttPublisher:
             self.client.on_connect = self._on_connect
             self.client.on_disconnect = self._on_disconnect
             self.client.on_publish = self._on_publish
-
             self.client.connect_async(self.host, self.port, keepalive=60)
             self.client.loop_start()
-            logger.info(
-                f"MQTT client connecting to {self.host}:{self.port}, topic: '{self.topic}' (retain={self.retain}, qos={self.qos})"
-            )
+            logger.info(f"MQTT connecting to {self.host}:{self.port}, topic: '{self.topic}'")
         except Exception as e:
-            logger.error(f"Failed to initialize MQTT client: {e}")
+            logger.error(f"MQTT init failed: {e}")
             self.client = None
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         rc_code = getattr(rc, "value", rc) if rc is not None else 0
-        if rc_code == 0:
-            self.connected = True
-            logger.info(f"Connected to MQTT broker at {self.host}:{self.port}")
+        self.connected = rc_code == 0
+        if self.connected:
+            logger.info(f"MQTT connected ({self.host}:{self.port})")
         else:
-            self.connected = False
-            logger.warning(f"Failed to connect to MQTT broker with return code: {rc}")
+            logger.warning(f"MQTT connect failed rc={rc}")
 
     def _on_disconnect(self, client, userdata, *args, **kwargs):
         self.connected = False
-        logger.warning(f"Disconnected from MQTT broker ({self.host}:{self.port})")
 
     def _on_publish(self, client, userdata, mid, reason_codes=None, properties=None):
-        logger.debug(f"MQTT message mid={mid} acknowledged by broker")
+        pass
 
     def publish_power(self, power: float):
-        """Publish power value as plain number to MQTT topic"""
         if not self.client:
             return
         try:
-            payload = f"{power:.1f}"
-            res = self.client.publish(
-                self.topic, payload=payload, qos=self.qos, retain=self.retain
-            )
+            res = self.client.publish(self.topic, payload=f"{power:.1f}", qos=self.qos, retain=self.retain)
             if res.rc != mqtt.MQTT_ERR_SUCCESS:
-                logger.warning(
-                    f"MQTT publish to '{self.topic}' returned error code: {res.rc}"
-                )
-            else:
-                logger.info(f"Published to MQTT '{self.topic}': {payload} W (retain={self.retain})")
+                logger.warning(f"MQTT publish error rc={res.rc}")
         except Exception as e:
-            logger.error(f"Failed to publish to MQTT: {e}")
+            logger.error(f"MQTT publish failed: {e}")
 
     def close(self):
-        """Stop MQTT loop and disconnect client"""
         if self.client:
             try:
                 self.connected = False
@@ -323,63 +288,104 @@ class MqttPublisher:
             except Exception:
                 pass
 
-
-mqtt_publisher: Optional[MqttPublisher] = None
-
-
-def get_mqtt_status() -> str:
-    """Get current MQTT connection status ('connected', 'disconnected', 'disabled')"""
-    if not mqtt_publisher or not mqtt_publisher.host:
-        return "disabled"
-    return "connected" if mqtt_publisher.connected else "disconnected"
+    @property
+    def status(self) -> str:
+        if not self.host:
+            return "disabled"
+        return "connected" if self.connected else "disconnected"
 
 
-async def realtime_collector(
-    collector: FroniusCollector,
-    writer: VictoriaMetricsWriter,
-    mqtt_publisher: Optional[MqttPublisher] = None,
-):
-    """Background task: collect real-time data every 10 seconds"""
+# ---------------------------------------------------------------------------
+# Global state
+# ---------------------------------------------------------------------------
+metrics_log: list = []
+MAX_LOG_ENTRIES = 50
+inverters_data: Dict[str, Dict[str, Any]] = {}
+collector_tasks: Dict[str, List[asyncio.Task]] = {}
+mqtt_publishers: Dict[str, MqttPublisher] = {}
+
+
+# ---------------------------------------------------------------------------
+# Per-inverter background tasks
+# ---------------------------------------------------------------------------
+async def realtime_collector(name: str, collector: FroniusCollector, writer: VictoriaMetricsWriter, mqtt_pub: Optional[MqttPublisher]):
     while True:
         try:
             data = await collector.get_realtime_data()
             if data:
-                await writer.write_realtime_metrics(data)
-                if mqtt_publisher:
-                    mqtt_publisher.publish_power(data["power"])
-                # Update cache for WebSocket
-                latest_data["power"] = data["power"]
-                latest_data["inverter_online"] = True
-                latest_data["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.info(f"Realtime data: Power={data['power']}W")
+                await writer.write_metric("fronius_power_watts", data["power"], {"inverter": name})
+                if mqtt_pub:
+                    mqtt_pub.publish_power(data["power"])
+                inverters_data[name] = {
+                    **inverters_data.get(name, {}),
+                    "power": data["power"],
+                    "online": True,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
             else:
-                # Inverter unreachable: flag it and publish 0 so consumers see standby
-                latest_data["inverter_online"] = False
-                if mqtt_publisher:
-                    mqtt_publisher.publish_power(0.0)
-                logger.warning("Inverter not reachable - publishing 0 to MQTT")
+                if mqtt_pub:
+                    mqtt_pub.publish_power(0.0)
+                inverters_data[name] = {**inverters_data.get(name, {}), "online": False}
         except Exception as e:
-            logger.error(f"Error in realtime collector: {e}")
-
+            logger.error(f"[{name}] realtime error: {e}")
         await asyncio.sleep(REALTIME_INTERVAL)
 
 
-async def energy_collector(collector: FroniusCollector, writer: VictoriaMetricsWriter):
-    """Background task: collect energy data every 15 minutes"""
+async def energy_collector(name: str, collector: FroniusCollector, writer: VictoriaMetricsWriter):
     while True:
         try:
             data = await collector.get_energy_data()
             if data:
-                await writer.write_energy_metrics(data)
-                latest_data["daily_energy"] = data["daily"]
-                logger.info(f"Energy data: Daily={data['daily']}Wh")
+                await writer.write_metric("fronius_daily_energy_watthours", data["daily"], {"inverter": name})
+                await writer.write_metric("fronius_yearly_energy_watthours", data["yearly"], {"inverter": name})
+                await writer.write_metric("fronius_total_energy_watthours", data["total"], {"inverter": name})
+                inverters_data[name] = {
+                    **inverters_data.get(name, {}),
+                    "daily_energy": data["daily"],
+                }
         except Exception as e:
-            logger.error(f"Error in energy collector: {e}")
-
+            logger.error(f"[{name}] energy error: {e}")
         await asyncio.sleep(ENERGY_INTERVAL)
 
 
-# HTML Dashboard
+def start_inverter_tasks(config: InverterConfig, writer: VictoriaMetricsWriter):
+    """Start background tasks for a single inverter."""
+    if config.name in collector_tasks:
+        return  # already running
+
+    collector = FroniusCollector(config.host)
+    mqtt_pub = None
+    if MQTT_HOST and config.mqtt_enabled:
+        mqtt_pub = MqttPublisher(
+            host=MQTT_HOST, port=MQTT_PORT, topic=config.mqtt_topic,
+            username=MQTT_USERNAME or None, password=MQTT_PASSWORD or None,
+            client_id=f"fronius2vim-{config.name}", qos=MQTT_QOS, retain=MQTT_RETAIN,
+        )
+    mqtt_publishers[config.name] = mqtt_pub
+
+    inverters_data[config.name] = {"power": 0, "daily_energy": 0, "online": False, "timestamp": ""}
+
+    t1 = asyncio.create_task(realtime_collector(config.name, collector, writer, mqtt_pub))
+    t2 = asyncio.create_task(energy_collector(config.name, collector, writer))
+    collector_tasks[config.name] = [t1, t2]
+    logger.info(f"Started collector for '{config.name}' ({config.host}) mqtt={config.mqtt_enabled}")
+
+
+def stop_inverter_tasks(name: str):
+    """Stop background tasks for an inverter."""
+    tasks = collector_tasks.pop(name, [])
+    for t in tasks:
+        t.cancel()
+    pub = mqtt_publishers.pop(name, None)
+    if pub:
+        pub.close()
+    inverters_data.pop(name, None)
+    logger.info(f"Stopped collector for '{name}'")
+
+
+# ---------------------------------------------------------------------------
+# Dashboard HTML
+# ---------------------------------------------------------------------------
 HTML_DASHBOARD = """
 <!DOCTYPE html>
 <html>
@@ -388,264 +394,45 @@ HTML_DASHBOARD = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        :root {
-            --evcc-green: #baffcb;
-            --evcc-dark-green: #0fde41;
-            --evcc-darker-green: #0ba631;
-            --evcc-yellow: #faf000;
-            --evcc-orange: #ff9000;
-            --evcc-red: #fc440f;
-            --bs-gray-dark: #28293e;
-            --bs-gray-medium: #93949e;
-            --bs-gray-bright: #f3f3f7;
-            --bs-gray-brighter: #f9f9fb;
-            --evcc-background: var(--bs-gray-bright);
-            --evcc-card: #ffffff;
-            --evcc-box-border: var(--bs-gray-brighter);
-            --evcc-text: var(--bs-gray-dark);
-            --evcc-text-secondary: var(--bs-gray-medium);
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: var(--evcc-background);
-            color: var(--evcc-text);
-            min-height: 100vh;
-        }
-        
-        /* Top Bar */
-        .top-bar {
-            background: var(--evcc-card);
-            border-bottom: 1px solid var(--evcc-box-border);
-            padding: 16px 24px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .site-title {
-            font-size: 1.125rem;
-            font-weight: 700;
-            letter-spacing: 0.5px;
-            color: var(--evcc-text);
-            text-transform: uppercase;
-        }
-        
-        .status-group {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
-        .status-badge {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 0.875rem;
-            color: var(--evcc-text-secondary);
-        }
-        
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #ef4444;
-        }
-        
-        .status-dot.connected {
-            background: var(--evcc-dark-green);
-        }
-
-        .status-dot.disabled {
-            background: var(--bs-gray-medium);
-            opacity: 0.5;
-        }
-        
-        /* Main Container */
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 24px;
-        }
-        
-        /* Metric Cards */
-        .metrics {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-        
-        @media (max-width: 640px) {
-            .metrics {
-                grid-template-columns: 1fr;
-            }
-        }
-        
-        .metric-card {
-            background: var(--evcc-card);
-            border-radius: 16px;
-            padding: 24px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        }
-        
-        .metric-label {
-            font-size: 0.75rem;
-            color: var(--evcc-text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 8px;
-        }
-        
-        .metric-value {
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: var(--evcc-text);
-            line-height: 1;
-        }
-        
-        .metric-unit {
-            font-size: 1rem;
-            font-weight: 400;
-            color: var(--evcc-text-secondary);
-            margin-left: 4px;
-        }
-        
-        /* Chart Cards */
-        .chart-card {
-            background: var(--evcc-card);
-            border-radius: 16px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        }
-        
-        .chart-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-        
-        .chart-title {
-            font-size: 0.875rem;
-            font-weight: 600;
-            color: var(--evcc-text);
-        }
-        
-        .timestamp {
-            font-size: 0.75rem;
-            color: var(--evcc-text-secondary);
-        }
-        
-        /* Legend */
-        .legend {
-            display: flex;
-            gap: 16px;
-            margin-bottom: 16px;
-            padding: 10px 14px;
-            background: #f9fafb;
-            border-radius: 8px;
-        }
-        
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 0.75rem;
-            color: var(--evcc-text-secondary);
-        }
-        
-        .legend-color {
-            width: 12px;
-            height: 12px;
-            border-radius: 2px;
-        }
-        
-        /* Metrics Log */
-        .metrics-log {
-            max-height: 300px;
-            overflow-y: auto;
-            font-family: 'SF Mono', Monaco, Inconsolata, 'Fira Code', monospace;
-            font-size: 0.75rem;
-            line-height: 1.5;
-        }
-        
-        .log-entry {
-            display: flex;
-            gap: 12px;
-            padding: 8px 12px;
-            border-bottom: 1px solid var(--evcc-box-border);
-            animation: fadeIn 0.3s ease;
-        }
-        
-        .log-entry:last-child {
-            border-bottom: none;
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; background: rgba(11, 166, 49, 0.1); }
-            to { opacity: 1; background: transparent; }
-        }
-        
-        .log-time {
-            color: var(--evcc-text-secondary);
-            flex-shrink: 0;
-            min-width: 60px;
-        }
-        
-        .log-status {
-            flex-shrink: 0;
-            width: 16px;
-            text-align: center;
-        }
-        
-        .log-status.success {
-            color: var(--evcc-dark-green);
-        }
-        
-        .log-status.error {
-            color: #ef4444;
-        }
-        
-        .log-data {
-            flex: 1;
-            word-break: break-all;
-        }
-        
-        .log-metric {
-            color: var(--evcc-text);
-            font-weight: 600;
-        }
-        
-        .log-value {
-            color: #faf000;
-        }
-        
-        .log-labels {
-            color: var(--evcc-text-secondary);
-        }
-        
-        .log-empty {
-            padding: 24px;
-            text-align: center;
-            color: var(--evcc-text-secondary);
-            font-style: italic;
-        }
-        
-        /* Footer */
-        .footer {
-            text-align: center;
-            padding: 24px;
-            color: var(--evcc-text-secondary);
-            font-size: 0.75rem;
-        }
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{--bg:#f3f3f7;--card:#fff;--border:#f9f9fb;--text:#28293e;--muted:#93949e;--green:#0fde41}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+        .top-bar{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
+        .site-title{font-size:1.125rem;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
+        .status-group{display:flex;align-items:center;gap:16px}
+        .status-badge{display:flex;align-items:center;gap:8px;font-size:.875rem;color:var(--muted)}
+        .status-dot{width:8px;height:8px;border-radius:50%;background:#ef4444}
+        .status-dot.connected{background:var(--green)}
+        .status-dot.disabled{background:var(--muted);opacity:.5}
+        .container{max-width:900px;margin:0 auto;padding:24px}
+        .inv-card{background:var(--card);border-radius:16px;padding:20px 24px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;align-items:center}
+        .inv-name{font-weight:600;font-size:1rem}
+        .inv-status{display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted)}
+        .inv-metrics{display:flex;gap:32px}
+        .inv-metric-val{font-size:1.5rem;font-weight:700}
+        .inv-metric-unit{font-size:.8rem;color:var(--muted);margin-left:2px}
+        .inv-metric-lbl{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+        .chart-card{background:var(--card);border-radius:16px;padding:20px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+        .chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+        .chart-title{font-size:.875rem;font-weight:600}
+        .timestamp{font-size:.75rem;color:var(--muted)}
+        .legend{display:flex;gap:16px;margin-bottom:16px;padding:10px 14px;background:#f9fafb;border-radius:8px}
+        .legend-item{display:flex;align-items:center;gap:6px;font-size:.75rem;color:var(--muted)}
+        .legend-color{width:12px;height:12px;border-radius:2px}
+        .metrics-log{max-height:300px;overflow-y:auto;font-family:'SF Mono',Monaco,monospace;font-size:.75rem;line-height:1.5}
+        .log-entry{display:flex;gap:12px;padding:8px 12px;border-bottom:1px solid var(--border);animation:fadeIn .3s ease}
+        .log-entry:last-child{border-bottom:none}
+        @keyframes fadeIn{from{opacity:0;background:rgba(11,166,49,.1)}to{opacity:1;background:transparent}}
+        .log-time{color:var(--muted);flex-shrink:0;min-width:60px}
+        .log-status{flex-shrink:0;width:16px;text-align:center}
+        .log-status.success{color:var(--green)}
+        .log-status.error{color:#ef4444}
+        .log-data{flex:1;word-break:break-all}
+        .log-metric{font-weight:600}
+        .log-value{color:#faf000}
+        .log-labels{color:var(--muted)}
+        .log-empty{padding:24px;text-align:center;color:var(--muted);font-style:italic}
+        .footer{text-align:center;padding:24px;color:var(--muted);font-size:.75rem}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -653,355 +440,70 @@ HTML_DASHBOARD = """
     <div class="top-bar">
         <div class="site-title">fronius2vim</div>
         <div class="status-group">
-            <div class="status-badge" id="inverterBadge" title="Inverter Status">
-                <span class="status-dot disabled" id="inverterStatusDot"></span>
-                <span id="inverterStatusText">Inverter</span>
-            </div>
-            <div class="status-badge" id="mqttBadge" title="MQTT Broker Status">
-                <span class="status-dot disabled" id="mqttStatusDot"></span>
-                <span id="mqttStatusText">MQTT</span>
-            </div>
-            <div class="status-badge" id="wsBadge" title="Live Connection Status">
-                <span class="status-dot" id="statusDot"></span>
-                <span id="statusText">Connecting...</span>
-            </div>
+            <div class="status-badge"><span class="status-dot disabled" id="mqttDot"></span><span id="mqttText">MQTT</span></div>
+            <div class="status-badge"><span class="status-dot" id="wsDot"></span><span id="wsText">Connecting...</span></div>
+            <a href="/admin" style="font-size:.8rem;color:var(--muted);text-decoration:none">admin</a>
         </div>
     </div>
-    
     <div class="container">
-        <!-- Two Metric Cards -->
-        <div class="metrics">
-            <div class="metric-card">
-                <div class="metric-label">Current Power</div>
-                <div class="metric-value">
-                    <span id="power">--</span><span class="metric-unit">kW</span>
-                </div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Daily Energy</div>
-                <div class="metric-value">
-                    <span id="dailyEnergy">--</span><span class="metric-unit">kWh</span>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Today's Chart -->
+        <div id="inverterCards"></div>
         <div class="chart-card">
             <div class="chart-header">
                 <div class="chart-title">Energy Generation Today</div>
                 <span class="timestamp" id="timestamp">--</span>
             </div>
             <div class="legend">
-                <div class="legend-item">
-                    <div class="legend-color" style="background: rgba(11, 166, 49, 0.8);"></div>
-                    <span>Energy (kWh)</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #faf000;"></div>
-                    <span>Power (kW)</span>
-                </div>
+                <div class="legend-item"><div class="legend-color" style="background:rgba(15,222,65,.8)"></div><span>Energy (kWh)</span></div>
+                <div class="legend-item"><div class="legend-color" style="background:#faf000"></div><span>Power (kW)</span></div>
             </div>
             <canvas id="combinedChart"></canvas>
         </div>
-        
-        <!-- 7 Day Chart -->
         <div class="chart-card">
-            <div class="chart-header">
-                <div class="chart-title">Last 7 Days Production</div>
-            </div>
+            <div class="chart-header"><div class="chart-title">Last 7 Days Production</div></div>
             <canvas id="sevenDayChart"></canvas>
         </div>
-        
-        <!-- Raw Metrics Log -->
         <div class="chart-card">
-            <div class="chart-header">
-                <div class="chart-title">Raw Metrics to VictoriaMetrics</div>
-                <span class="timestamp">Last 50 writes</span>
-            </div>
-            <div class="metrics-log" id="metricsLog">
-                <div class="log-empty">Waiting for metrics...</div>
-            </div>
+            <div class="chart-header"><div class="chart-title">Raw Metrics to VictoriaMetrics</div><span class="timestamp">Last 50</span></div>
+            <div class="metrics-log" id="metricsLog"><div class="log-empty">Waiting for metrics...</div></div>
         </div>
     </div>
-    
-    <div class="footer">
-        fronius2vim
-    </div>
-
+    <div class="footer">fronius2vim</div>
     <script>
-        let ws = null;
-        
-        // Chart.js setup for combined chart
         const ctx = document.getElementById('combinedChart').getContext('2d');
         const combinedChart = new Chart(ctx, {
             type: 'bar',
-            data: {
-                labels: [],
-                datasets: [
-                    {
-                        label: 'Energy (kWh)',
-                        data: [],
-                        backgroundColor: 'rgba(15, 222, 65, 0.8)',
-                        borderColor: 'rgba(15, 222, 65, 1)',
-                        borderWidth: 0,
-                        borderRadius: 3,
-                        yAxisID: 'y',
-                        order: 2,
-                        barPercentage: 1.0,
-                        categoryPercentage: 3.8
-                    },
-                    {
-                        type: 'line',
-                        borderColor: '#faf000',
-                        backgroundColor: 'rgba(250, 240, 0, 0.1)',
-                        borderWidth: 2,
-                        tension: 0.4,
-                        pointRadius: 0,
-                        pointHoverRadius: 4,
-                        yAxisID: 'y1',
-                        order: 1
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: true,
-                interaction: {
-                    mode: 'index',
-                    intersect: false,
-                },
-                scales: {
-                    y: {
-                        type: 'linear',
-                        display: true,
-                        position: 'left',
-                        beginAtZero: true,
-                        grid: { 
-                            color: 'rgba(0, 0, 0, 0.04)',
-                            drawBorder: false
-                        },
-                        ticks: { 
-                            color: '#6b7280',
-                            font: { size: 11 }
-                        }
-                    },
-                    y1: {
-                        type: 'linear',
-                        display: true,
-                        position: 'right',
-                        beginAtZero: true,
-                        max: 35,
-                        grid: { display: false },
-                        ticks: { 
-                            color: '#93949e',
-                            font: { size: 11 }
-                        }
-                    },
-                    x: {
-                        grid: { display: false },
-                        ticks: { 
-                            color: '#6b7280',
-                            font: { size: 11 },
-                            maxRotation: 45,
-                            autoSkip: true,
-                            maxTicksLimit: 12
-                        }
-                    }
-                },
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        backgroundColor: 'rgba(45, 51, 66, 0.95)',
-                        padding: 12,
-                        cornerRadius: 8,
-                        titleFont: { size: 13 },
-                        bodyFont: { size: 12 }
-                    }
-                }
-            }
+            data: {labels:[], datasets:[
+                {label:'Energy',data:[],backgroundColor:'rgba(15,222,65,.8)',borderWidth:0,borderRadius:3,yAxisID:'y',order:2,barPercentage:1,categoryPercentage:3.8},
+                {type:'line',borderColor:'#faf000',backgroundColor:'rgba(250,240,0,.1)',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1}
+            ]},
+            options:{responsive:true,maintainAspectRatio:true,interaction:{mode:'index',intersect:false},scales:{y:{type:'linear',position:'left',beginAtZero:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#6b7280',font:{size:11}}},y1:{type:'linear',position:'right',beginAtZero:true,max:35,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}},x:{grid:{display:false},ticks:{color:'#6b7280',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12}}},plugins:{legend:{display:false}}}
         });
+        async function fetchCombinedData(){try{const r=await fetch('/api/today');const d=await r.json();if(d.points&&d.points.length){combinedChart.data.labels=d.points.map(p=>p.time);combinedChart.data.datasets[0].data=d.points.map(p=>p.kwh);combinedChart.data.datasets[1].data=d.points.map(p=>p.power/1000);combinedChart.update()}}catch(e){}}
+        fetchCombinedData();setInterval(fetchCombinedData,300000);
 
-        // Fetch combined data
-        async function fetchCombinedData() {
-            try {
-                const response = await fetch('/api/today');
-                const data = await response.json();
-                
-                if (data.points && data.points.length > 0) {
-                    combinedChart.data.labels = data.points.map(p => p.time);
-                    combinedChart.data.datasets[0].data = data.points.map(p => p.kwh);
-                    combinedChart.data.datasets[1].data = data.points.map(p => p.power / 1000);
-                    combinedChart.update();
-                }
-            } catch (error) {
-                console.error('Failed to fetch combined data:', error);
-            }
-        }
-
-        fetchCombinedData();
-        setInterval(fetchCombinedData, 300000);
-
-        // 7-day chart setup
-        const sevenDayCtx = document.getElementById('sevenDayChart').getContext('2d');
-        const sevenDayChart = new Chart(sevenDayCtx, {
-            type: 'bar',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Energy (kWh)',
-                    data: [],
-                    backgroundColor: 'rgba(15, 222, 65, 0.8)',
-                    borderColor: 'rgba(15, 222, 65, 1)',
-                    borderWidth: 0,
-                    borderRadius: 4,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: true,
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        grid: { 
-                            color: 'rgba(0, 0, 0, 0.04)',
-                            drawBorder: false
-                        },
-                        ticks: { 
-                            color: '#93949e',
-                            font: { size: 11 }
-                        }
-                    },
-                    x: {
-                        grid: { display: false },
-                        ticks: { 
-                            color: '#93949e',
-                            font: { size: 11 }
-                        }
-                    }
-                },
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        backgroundColor: 'rgba(45, 51, 66, 0.95)',
-                        padding: 12,
-                        cornerRadius: 8,
-                        callbacks: {
-                            label: function(context) {
-                                return context.parsed.y.toFixed(2) + ' kWh';
-                            }
-                        }
-                    }
-                }
-            }
+        const sCtx = document.getElementById('sevenDayChart').getContext('2d');
+        const sevenDayChart = new Chart(sCtx, {
+            type:'bar',data:{labels:[],datasets:[{label:'Energy',data:[],backgroundColor:'rgba(15,222,65,.8)',borderWidth:0,borderRadius:4}]},
+            options:{responsive:true,maintainAspectRatio:true,scales:{y:{beginAtZero:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#93949e',font:{size:11}}},x:{grid:{display:false},ticks:{color:'#93949e',font:{size:11}}}},plugins:{legend:{display:false}}}
         });
+        async function fetchSevenDay(){try{const r=await fetch('/api/history/7days');const d=await r.json();if(d.days&&d.days.length){sevenDayChart.data.labels=d.days.map(d=>d.date);sevenDayChart.data.datasets[0].data=d.days.map(d=>d.kwh);sevenDayChart.update()}}catch(e){}}
+        fetchSevenDay();setInterval(fetchSevenDay,3600000);
 
-        async function fetchSevenDayData() {
-            try {
-                const response = await fetch('/api/history/7days');
-                const data = await response.json();
+        let ws;
+        function renderCards(inverters){const c=document.getElementById('inverterCards');c.innerHTML=inverters.map(inv=>{const d=inv.data||{};const on=d.online;const p=(d.power/1000).toFixed(2);const e=(d.daily_energy/1000).toFixed(2);return `<div class="inv-card"><div><div class="inv-name">${inv.name}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span style="color:var(--muted);margin-left:8px">${inv.host}</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">kW</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Today</div></div></div></div>`}).join('')}
 
-                if (data.days && data.days.length > 0) {
-                    sevenDayChart.data.labels = data.days.map(d => d.date);
-                    sevenDayChart.data.datasets[0].data = data.days.map(d => d.kwh);
-                    sevenDayChart.update();
-                }
-            } catch (error) {
-                console.error('Failed to fetch 7-day data:', error);
-            }
+        function connect(){
+            ws=new WebSocket(`ws://${window.location.host}/ws`);
+            ws.onopen=()=>{document.getElementById('wsText').textContent='Connected';document.getElementById('wsDot').className='status-dot connected'};
+            ws.onmessage=(e)=>{
+                const d=JSON.parse(e.data);
+                if(d.inverters)renderCards(d.inverters);
+                if(d.timestamp)document.getElementById('timestamp').textContent=d.timestamp;
+                if(d.mqtt_status!==undefined){const m=document.getElementById('mqttDot');const t=document.getElementById('mqttText');if(d.mqtt_status==='connected'){m.className='status-dot connected';t.textContent='MQTT'}else if(d.mqtt_status==='disconnected'){m.className='status-dot';t.textContent='MQTT'}else{m.className='status-dot disabled';t.textContent='MQTT (off)'}}
+                if(d.metrics_log&&d.metrics_log.length){document.getElementById('metricsLog').innerHTML=d.metrics_log.map(en=>{const lb=Object.entries(en.labels||{}).map(([k,v])=>`${k}="${v}"`).join(', ');return `<div class="log-entry"><span class="log-time">${en.timestamp}</span><span class="log-status ${en.status}">${en.status==='success'?'✓':'✗'}</span><span class="log-data"><span class="log-metric">${en.metric}</span> <span class="log-value">${en.value}</span> <span class="log-labels">{${lb}}</span></span></div>`}).join('')}
+            };
+            ws.onclose=()=>{document.getElementById('wsText').textContent='Disconnected';document.getElementById('wsDot').className='status-dot';setTimeout(connect,5000)};
         }
-
-        fetchSevenDayData();
-        setInterval(fetchSevenDayData, 3600000);
-
-        function connect() {
-            ws = new WebSocket(`ws://${window.location.host}/ws`);
-            
-            ws.onopen = () => {
-                document.getElementById('statusText').textContent = 'Connected';
-                document.getElementById('statusDot').className = 'status-dot connected';
-            };
-            
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                
-                if (data.power !== undefined) {
-                    document.getElementById('power').textContent = (data.power / 1000).toFixed(2);
-                }
-                
-                if (data.daily_energy !== undefined) {
-                    document.getElementById('dailyEnergy').textContent = (data.daily_energy / 1000).toFixed(2);
-                }
-
-                if (data.timestamp) {
-                    document.getElementById('timestamp').textContent = data.timestamp;
-                }
-
-                // Update Inverter indicator
-                if (data.inverter_online !== undefined) {
-                    const invDot = document.getElementById('inverterStatusDot');
-                    const invText = document.getElementById('inverterStatusText');
-                    if (data.inverter_online) {
-                        invDot.className = 'status-dot connected';
-                        invText.textContent = 'Inverter';
-                        invText.title = 'Inverter Online';
-                    } else {
-                        invDot.className = 'status-dot';
-                        invText.textContent = 'Inverter';
-                        invText.title = 'Inverter Offline';
-                    }
-                }
-
-                // Update MQTT indicator
-                if (data.mqtt_status !== undefined) {
-                    const mqttDot = document.getElementById('mqttStatusDot');
-                    const mqttText = document.getElementById('mqttStatusText');
-                    if (data.mqtt_status === 'connected') {
-                        mqttDot.className = 'status-dot connected';
-                        mqttText.textContent = 'MQTT';
-                        mqttText.title = 'MQTT Connected';
-                    } else if (data.mqtt_status === 'disconnected') {
-                        mqttDot.className = 'status-dot';
-                        mqttText.textContent = 'MQTT';
-                        mqttText.title = 'MQTT Disconnected';
-                    } else {
-                        mqttDot.className = 'status-dot disabled';
-                        mqttText.textContent = 'MQTT (off)';
-                        mqttText.title = 'MQTT Disabled (MQTT_HOST not set)';
-                    }
-                }
-                
-                // Update metrics log display
-                if (data.metrics_log && data.metrics_log.length > 0) {
-                    const logContainer = document.getElementById('metricsLog');
-                    logContainer.innerHTML = data.metrics_log.map(entry => {
-                        const labels = Object.entries(entry.labels || {}).map(([k,v]) => `${k}="${v}"`).join(', ');
-                        return `
-                            <div class="log-entry">
-                                <span class="log-time">${entry.timestamp}</span>
-                                <span class="log-status ${entry.status}">${entry.status === 'success' ? '✓' : '✗'}</span>
-                                <span class="log-data">
-                                    <span class="log-metric">${entry.metric}</span>
-                                    <span class="log-value">${entry.value}</span>
-                                    <span class="log-labels">{${labels}}</span>
-                                </span>
-                            </div>
-                        `;
-                    }).join('');
-                }
-            };
-            
-            ws.onclose = () => {
-                document.getElementById('statusText').textContent = 'Disconnected';
-                document.getElementById('statusDot').className = 'status-dot';
-                document.getElementById('mqttStatusDot').className = 'status-dot';
-                setTimeout(connect, 5000);
-            };
-            
-            ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
-            };
-        }
-        
         connect();
     </script>
 </body>
@@ -1009,117 +511,195 @@ HTML_DASHBOARD = """
 """
 
 
+# ---------------------------------------------------------------------------
+# Admin HTML
+# ---------------------------------------------------------------------------
+HTML_ADMIN = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>fronius2vim Admin</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f3f3f7;color:#28293e;min-height:100vh;padding:24px}
+        .wrap{max-width:800px;margin:0 auto}
+        h1{font-size:1.25rem;margin-bottom:24px}
+        table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:24px}
+        th,td{padding:12px 16px;text-align:left;border-bottom:1px solid #f3f3f7;font-size:.875rem}
+        th{background:#f9f9fb;font-weight:600;text-transform:uppercase;font-size:.75rem;letter-spacing:.5px;color:#93949e}
+        .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+        .dot.on{background:#0fde41}.dot.off{background:#ef4444}.dot.na{background:#93949e;opacity:.5}
+        .btn{border:none;border-radius:6px;padding:6px 14px;font-size:.8rem;cursor:pointer;font-weight:500}
+        .btn-del{background:#fee;color:#e11d48}.btn-del:hover{background:#fdd}
+        .btn-save{background:#e8fde8;color:#16a34a}.btn-save:hover{background:#d4f5d4}
+        .form-card{background:#fff;border-radius:12px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:24px}
+        .form-card h2{font-size:.875rem;font-weight:600;margin-bottom:16px}
+        .field{margin-bottom:12px}
+        .field label{display:block;font-size:.75rem;color:#93949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+        .field input,.field select{width:100%;padding:8px 12px;border:1px solid #e5e7eb;border-radius:8px;font-size:.875rem}
+        .field input:focus,.field select:focus{outline:none;border-color:#0fde41}
+        .actions{display:flex;gap:12px;margin-top:16px}
+        a{color:#93949e;text-decoration:none}
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1>Inverter Management <a href="/">back to dashboard</a></h1>
+    <table>
+        <thead><tr><th>Name</th><th>IP</th><th>MQTT</th><th>Status</th><th></th></tr></thead>
+        <tbody id="invTable"></tbody>
+    </table>
+    <div class="form-card">
+        <h2>Add Inverter</h2>
+        <div class="field"><label>Name</label><input id="fName" placeholder="e.g. Verto1-37123716"></div>
+        <div class="field"><label>IP Address</label><input id="fHost" placeholder="e.g. 172.20.204.102"></div>
+        <div class="field"><label>Publish to MQTT</label><select id="fMqtt"><option value="false">No</option><option value="true">Yes</option></select></div>
+        <div class="actions"><button class="btn btn-save" onclick="addInverter()">Add Inverter</button></div>
+    </div>
+</div>
+<script>
+let inverters=[];
+async function load(){const r=await fetch('/api/inverters');inverters=await r.json();render()}
+function render(){document.getElementById('invTable').innerHTML=inverters.map((inv,i)=>{const st=inv.online?'on':(inv.host?'off':'na');const stl=inv.online?'Online':(inv.host?'Offline':'?');return `<tr><td><strong>${inv.name}</strong></td><td>${inv.host}</td><td>${inv.mqtt_enabled?'<span style="color:#16a34a">Yes</span>':'<span style="color:#93949e">No</span>'}</td><td><span class="dot ${st}"></span>${stl}</td><td><button class="btn btn-del" onclick="delInverter(${i})">Remove</button></td></tr>`}).join('')}
+async function addInverter(){const n=document.getElementById('fName').value.trim();const h=document.getElementById('fHost').value.trim();const m=document.getElementById('fMqtt').value==='true';if(!n||!h)return alert('Name and IP required');await fetch('/api/inverters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m})});document.getElementById('fName').value='';document.getElementById('fHost').value='';load()}
+async function delInverter(i){if(!confirm('Remove '+inverters[i].name+'?'))return;await fetch('/api/inverters/'+encodeURIComponent(inverters[i].name),{method:'DELETE'});load()}
+load();setInterval(load,5000);
+</script>
+</body>
+</html>
+"""
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    """Serve the dashboard HTML"""
     return HTML_DASHBOARD
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page():
+    return HTML_ADMIN
 
 
 @app.get("/api/data")
 async def get_data():
-    """REST API endpoint for current data"""
-    return {
-        **latest_data,
-        "mqtt_status": get_mqtt_status(),
-    }
+    inv_list = load_inverters()
+    mqtt_any = any(mqtt_publishers.get(c.name) and mqtt_publishers[c.name].connected for c in inv_list)
+    mqtt_status = "connected" if mqtt_any else ("disabled" if not MQTT_HOST else "disconnected")
+    return {"inverters": inverters_data, "mqtt_status": mqtt_status}
+
+
+@app.get("/api/inverters")
+async def get_inverters():
+    configs = load_inverters()
+    result = []
+    for c in configs:
+        pub = mqtt_publishers.get(c.name)
+        result.append({
+            "name": c.name,
+            "host": c.host,
+            "mqtt_enabled": c.mqtt_enabled,
+            "mqtt_topic": c.mqtt_topic,
+            "online": inverters_data.get(c.name, {}).get("online", False),
+        })
+    return result
+
+
+@app.post("/api/inverters")
+async def add_inverter(body: dict):
+    configs = load_inverters()
+    name = body.get("name", "").strip()
+    host = body.get("host", "").strip()
+    mqtt_enabled = body.get("mqtt_enabled", False)
+
+    if not name or not host:
+        return {"error": "name and host required"}
+    if any(c.name == name for c in configs):
+        return {"error": f"inverter '{name}' already exists"}
+
+    new_cfg = InverterConfig(name=name, host=host, mqtt_enabled=mqtt_enabled)
+    configs.append(new_cfg)
+    save_inverters(configs)
+
+    writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
+    start_inverter_tasks(new_cfg, writer)
+
+    return {"ok": True, "name": name}
+
+
+@app.delete("/api/inverters/{name}")
+async def delete_inverter(name: str):
+    configs = load_inverters()
+    configs = [c for c in configs if c.name != name]
+    save_inverters(configs)
+    stop_inverter_tasks(name)
+    return {"ok": True}
+
+
+@app.patch("/api/inverters/{name}")
+async def update_inverter(name: str, body: dict):
+    configs = load_inverters()
+    for c in configs:
+        if c.name == name:
+            if "mqtt_enabled" in body:
+                c.mqtt_enabled = body["mqtt_enabled"]
+            if "host" in body:
+                c.host = body["host"]
+            break
+    else:
+        return {"error": "not found"}
+
+    save_inverters(configs)
+    stop_inverter_tasks(name)
+    writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
+    start_inverter_tasks(c, writer)
+    return {"ok": True}
 
 
 @app.get("/api/today")
 async def get_today():
-    """Query VictoriaMetrics for last 24 hours of combined energy and power data at 15m intervals"""
     try:
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         start_24h_utc = now_utc - timedelta(hours=24)
-        start_timestamp = int(start_24h_utc.timestamp())
-
+        start_ts = int(start_24h_utc.timestamp())
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
 
-        # Energy query (15m step)
-        energy_params = {
-            "query": "fronius_daily_energy_watthours",
-            "start": start_timestamp,
-            "end": int(now_utc.timestamp()),
-            "step": "15m",
-        }
-
-        # Power query (15m step)
-        power_params = {
-            "query": "avg_over_time(fronius_power_watts[15m])",
-            "start": start_timestamp,
-            "end": int(now_utc.timestamp()),
-            "step": "15m",
-        }
+        energy_params = {"query": "fronius_daily_energy_watthours", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
+        power_params = {"query": "avg_over_time(fronius_power_watts[15m])", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
 
         async with httpx.AsyncClient() as client:
-            e_res, p_res = await asyncio.gather(
-                client.get(query_url, params=energy_params),
-                client.get(query_url, params=power_params),
-            )
+            e_res, p_res = await asyncio.gather(client.get(query_url, params=energy_params), client.get(query_url, params=power_params))
             e_res.raise_for_status()
             p_res.raise_for_status()
+            e_data, p_data = e_res.json(), p_res.json()
 
-            e_data = e_res.json()
-            p_data = p_res.json()
+        e_points_15m = {}
+        if e_data.get("status") == "success" and e_data.get("data", {}).get("result"):
+            values = e_data["data"]["result"][0].get("values", [])
+            for i in range(1, len(values)):
+                ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
+                kwh = (curr - prev) / 1000
+                if kwh >= 0:
+                    e_points_15m[ts] = kwh
 
-            # Process Energy (calculate 15m diffs, then sum up hourly)
-            e_points_15m = {}
-            if e_data.get("status") == "success" and e_data.get("data", {}).get(
-                "result"
-            ):
-                values = e_data["data"]["result"][0].get("values", [])
-                for i in range(1, len(values)):
-                    ts = int(values[i][0])
-                    curr = float(values[i][1])
-                    prev = float(values[i - 1][1])
-                    kwh_generated = (curr - prev) / 1000
+        p_points = {}
+        if p_data.get("status") == "success" and p_data.get("data", {}).get("result"):
+            for v in p_data["data"]["result"][0].get("values", []):
+                p_points[int(v[0])] = round(float(v[1]), 0)
 
-                    if kwh_generated >= 0:
-                        e_points_15m[ts] = kwh_generated
+        all_ts = sorted(set(e_points_15m.keys()) | set(p_points.keys()))
+        hourly, cur = {}, 0.0
+        for ts in all_ts:
+            cur += e_points_15m.get(ts, 0.0)
+            if datetime.fromtimestamp(ts).minute == 0:
+                hourly[ts - 1800] = round(cur, 2)
+                cur = 0.0
 
-            # Process Power (15m)
-            p_points = {}
-            if p_data.get("status") == "success" and p_data.get("data", {}).get(
-                "result"
-            ):
-                values = p_data["data"]["result"][0].get("values", [])
-                for v in values:
-                    ts = int(v[0])
-                    power = float(v[1])
-                    p_points[ts] = round(power, 0)
-
-            # Merge exactly by timestamp
-            all_ts = sorted(set(e_points_15m.keys()) | set(p_points.keys()))
-
-            # Group into hourly sums and assign them to the middle of the hour (:30)
-            hourly_kwh_sums = {}
-            current_hour_kwh = 0.0
-
-            for ts in all_ts:
-                dt = datetime.fromtimestamp(ts)
-                current_hour_kwh += e_points_15m.get(ts, 0.0)
-
-                # We emit the hourly sum exactly on the hour mark (XX:00)
-                # but assign it to the midpoint of the hour (XX:30) for perfect chart alignment
-                if dt.minute == 0:
-                    center_ts = ts - 1800  # 30 mins before the end of the hour
-                    hourly_kwh_sums[center_ts] = round(current_hour_kwh, 2)
-                    current_hour_kwh = 0.0
-
-            points = []
-            for ts in all_ts:
-                dt = datetime.fromtimestamp(ts)
-                kwh_val = hourly_kwh_sums.get(ts, None)
-
-                points.append(
-                    {
-                        "time": dt.strftime("%H:%M"),
-                        "kwh": kwh_val,
-                        "power": p_points.get(ts, 0.0),
-                    }
-                )
-
-            return {"points": points}
-
+        points = [{"time": datetime.fromtimestamp(ts).strftime("%H:%M"), "kwh": hourly.get(ts), "power": p_points.get(ts, 0.0)} for ts in all_ts]
+        return {"points": points}
     except Exception as e:
         logger.error(f"Failed to fetch today data: {e}")
         return {"points": [], "error": str(e)}
@@ -1127,140 +707,93 @@ async def get_today():
 
 @app.get("/api/history/7days")
 async def get_7day_history():
-    """Query VictoriaMetrics for daily energy production over last 7 days"""
     try:
         now = datetime.now()
-        # Build list of last 7 days
         days_list = []
         for i in range(6, -1, -1):
-            day_date = now - timedelta(days=i)
-            day_start = day_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            day_label = day_start.strftime("%a %d")
-            days_list.append(
-                {
-                    "date": day_label,
-                    "kwh": 0.0,
-                    "start_ts": int(day_start.timestamp()),
-                    "end_ts": int((day_start + timedelta(days=1)).timestamp()),
-                }
-            )
+            day = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+            days_list.append({"date": day.strftime("%a %d"), "kwh": 0.0, "start_ts": int(day.timestamp())})
 
-        # Query data at 15m intervals and find daily max (counters reset at midnight)
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
-        params = {
-            "query": "fronius_daily_energy_watthours",
-            "start": days_list[0]["start_ts"],
-            "end": int(now.timestamp()),
-            "step": "15m",
-        }
+        params = {"query": "fronius_daily_energy_watthours", "start": days_list[0]["start_ts"], "end": int(now.timestamp()), "step": "15m"}
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(query_url, params=params)
-            response.raise_for_status()
-            data = response.json()
+            resp = await client.get(query_url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
 
-            # Collect all values by date
-            values_by_date = {}
-            if data.get("status") == "success" and data.get("data", {}).get("result"):
-                for result in data["data"]["result"]:
-                    for value in result.get("values", []):
-                        timestamp = int(value[0])
-                        wh = float(value[1])
-                        kwh = wh / 1000
+        values_by_date = {}
+        if data.get("status") == "success" and data.get("data", {}).get("result"):
+            for result in data["data"]["result"]:
+                for v in result.get("values", []):
+                    ts, wh = int(v[0]), float(v[1])
+                    day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    day_label = datetime.fromtimestamp(ts).strftime("%a %d")
+                    if day_key not in values_by_date or wh / 1000 > values_by_date[day_key]["kwh"]:
+                        values_by_date[day_key] = {"kwh": wh / 1000, "label": day_label}
 
-                        # Find max for each day (date in YYYY-MM-DD format for grouping)
-                        day_key = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
-                        day_label = datetime.fromtimestamp(timestamp).strftime("%a %d")
-                        if (
-                            day_key not in values_by_date
-                            or kwh > values_by_date[day_key]["kwh"]
-                        ):
-                            values_by_date[day_key] = {"kwh": kwh, "label": day_label}
+        for day in days_list:
+            for dd in values_by_date.values():
+                if dd["label"] == day["date"]:
+                    day["kwh"] = round(dd["kwh"], 2)
+                    break
 
-                # Fill in the days list with actual values
-                for day in days_list:
-                    for day_data in values_by_date.values():
-                        if day_data["label"] == day["date"]:
-                            day["kwh"] = round(day_data["kwh"], 2)
-                            break
-
-            # Return clean format without internal fields
-            return {
-                "days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list],
-            }
-
+        return {"days": [{"date": d["date"], "kwh": d["kwh"]} for d in days_list]}
     except Exception as e:
         logger.error(f"Failed to fetch 7-day history: {e}")
         return {"days": [], "error": str(e)}
 
 
+@app.get("/api/metrics-log")
+async def get_metrics_log():
+    return {"metrics": metrics_log}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates"""
     await websocket.accept()
     try:
         while True:
-            data = {
-                "power": latest_data.get("power", 0),
-                "daily_energy": latest_data.get("daily_energy", 0),
-                "inverter_online": latest_data.get("inverter_online", False),
-                "timestamp": latest_data.get("timestamp", ""),
+            configs = load_inverters()
+            mqtt_any = any(mqtt_publishers.get(c.name) and mqtt_publishers[c.name].connected for c in configs)
+            mqtt_status = "connected" if mqtt_any else ("disabled" if not MQTT_HOST else "disconnected")
+            await websocket.send_json({
+                "inverters": [{"name": c.name, "host": c.host, "data": inverters_data.get(c.name, {})} for c in configs],
                 "metrics_log": metrics_log,
-                "mqtt_status": get_mqtt_status(),
-            }
-            await websocket.send_json(data)
+                "mqtt_status": mqtt_status,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
             await asyncio.sleep(REALTIME_INTERVAL)
     except Exception:
         await websocket.close()
 
 
-@app.get("/api/metrics-log")
-async def get_metrics_log():
-    """Get recent metrics written to VictoriaMetrics"""
-    return {"metrics": metrics_log}
-
-
+# ---------------------------------------------------------------------------
+# Startup / Shutdown
+# ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
-    """Start background collectors on app startup"""
-    global mqtt_publisher
-    collector = FroniusCollector(FRONIUS_HOST)
     writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
-    mqtt_publisher = MqttPublisher(
-        host=MQTT_HOST,
-        port=MQTT_PORT,
-        topic=MQTT_TOPIC,
-        username=MQTT_USERNAME if MQTT_USERNAME else None,
-        password=MQTT_PASSWORD if MQTT_PASSWORD else None,
-        client_id=MQTT_CLIENT_ID,
-        qos=MQTT_QOS,
-        retain=MQTT_RETAIN,
-    )
+    configs = load_inverters()
 
     logger.info("Starting fronius2vim")
-    logger.info(f"Fronius host: {FRONIUS_HOST}")
     logger.info(f"VictoriaMetrics URL: {VICTORIAMETRICS_URL}")
+    logger.info(f"Realtime interval: {REALTIME_INTERVAL}s  |  Energy interval: {ENERGY_INTERVAL}s")
     if MQTT_HOST:
-        logger.info(f"MQTT broker: {MQTT_HOST}:{MQTT_PORT}, topic: {MQTT_TOPIC}")
+        logger.info(f"MQTT broker: {MQTT_HOST}:{MQTT_PORT}")
     else:
-        logger.info("MQTT broker: disabled (MQTT_HOST not set)")
-    logger.info(f"Realtime interval: {REALTIME_INTERVAL}s")
-    logger.info(f"Energy interval: {ENERGY_INTERVAL}s")
+        logger.info("MQTT broker: disabled")
 
-    # Start background tasks
-    asyncio.create_task(realtime_collector(collector, writer, mqtt_publisher))
-    asyncio.create_task(energy_collector(collector, writer))
+    for cfg in configs:
+        start_inverter_tasks(cfg, writer)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean up resources on app shutdown"""
-    global mqtt_publisher
-    if mqtt_publisher:
-        mqtt_publisher.close()
+    for name in list(mqtt_publishers.keys()):
+        stop_inverter_tasks(name)
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=WEB_PORT)

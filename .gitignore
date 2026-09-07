@@ -1,6 +1,7 @@
 # Local environment overrides — never commit this file
 docker-compose.yml
 .env
+inverters.json
 
 # Python
 __pycache__/

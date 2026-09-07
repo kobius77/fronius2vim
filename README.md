@@ -107,7 +107,12 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 ## API Endpoints
 
 - `GET /` - Web dashboard
-- `GET /api/data` - Current metrics & MQTT status (JSON)
+- `GET /admin` - Inverter management panel (add/remove inverters, MQTT toggles)
+- `GET /api/data` - Current metrics for all inverters (JSON)
+- `GET /api/inverters` - List configured inverters with status
+- `POST /api/inverters` - Add an inverter `{"name": "...", "host": "...", "mqtt_enabled": bool}`
+- `PATCH /api/inverters/{name}` - Update inverter (e.g. toggle MQTT)
+- `DELETE /api/inverters/{name}` - Remove an inverter
 - `GET /api/today` - 24-hour combined hourly energy and 15m power history (from VictoriaMetrics)
 - `GET /api/history/7days` - 7-day daily energy generation history (from VictoriaMetrics)
 - `GET /api/metrics-log` - Last 50 metric writes to VictoriaMetrics
