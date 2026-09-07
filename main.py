@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,15 @@ FRONIUS_HOST = os.getenv("FRONIUS_HOST", "172.20.203.100")
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power").strip().strip("\"'")
 
 # Inverters persistence
-INVERTERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inverters.json")
+# Path is overridable (e.g. mount to a volume). Defaults to next to main.py.
+INVERTERS_FILE = os.getenv(
+    "INVERTERS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "inverters.json"),
+).strip().strip("\"'")
+INVERTERS_BACKUP = INVERTERS_FILE + ".bak"
+
+# Serializes read-modify-write of the inverter config (prevents races / lost updates)
+config_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -75,30 +84,73 @@ class InverterConfig:
 
 
 def load_inverters() -> List[InverterConfig]:
-    """Load inverters from JSON file, or seed from env vars on first boot."""
-    if os.path.exists(INVERTERS_FILE):
+    """Load inverters from JSON file. NEVER writes to disk — a transient/missing
+    file must not silently reset the user's configuration."""
+    if os.path.exists(INVERTERS_FILE) and os.path.isfile(INVERTERS_FILE):
         try:
             with open(INVERTERS_FILE, "r") as f:
                 data = json.load(f)
             return [InverterConfig(**item) for item in data]
         except Exception as e:
             logger.error(f"Failed to load {INVERTERS_FILE}: {e}")
+    elif os.path.exists(INVERTERS_FILE) and not os.path.isfile(INVERTERS_FILE):
+        # Docker bind-mount created a directory instead of a file — move it aside and heal
+        broken = f"{INVERTERS_FILE}.broken-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        logger.error(
+            f"{INVERTERS_FILE} is a DIRECTORY (docker bind-mount created it) — moving it aside to {broken}"
+        )
+        try:
+            os.rename(INVERTERS_FILE, broken)
+        except Exception as e:
+            logger.error(f"Could not move directory aside: {e}")
 
-    # First boot: seed from legacy FRONIUS_HOST
-    seed = [InverterConfig(name="Fronius", host=FRONIUS_HOST, mqtt_enabled=bool(MQTT_HOST), mqtt_topic=MQTT_TOPIC)]
-    save_inverters(seed)
-    logger.info(f"Created {INVERTERS_FILE} from env vars")
+    # Try to heal from the last known-good backup so config is never lost
+    if os.path.isfile(INVERTERS_BACKUP):
+        logger.warning(f"{INVERTERS_FILE} missing — restoring from backup {INVERTERS_BACKUP}")
+        try:
+            with open(INVERTERS_BACKUP, "r") as f:
+                data = json.load(f)
+            configs = [InverterConfig(**item) for item in data]
+            _write_inverters_atomic(configs)  # re-create the main file from backup
+            return configs
+        except Exception as e:
+            logger.error(f"Failed to restore from backup: {e}")
+
+    # First boot fallback (in-memory only, derived from legacy env vars)
+    seed = [InverterConfig(
+        name="Fronius", host=FRONIUS_HOST,
+        mqtt_enabled=bool(MQTT_HOST), mqtt_topic=MQTT_TOPIC,
+    )]
+    logger.warning(
+        f"{INVERTERS_FILE} not found — using ephemeral config {[c.name for c in seed]}. "
+        f"Add inverters via /admin to persist them. Check the volume mount to avoid data loss."
+    )
     return seed
 
 
-def save_inverters(configs: List[InverterConfig]):
-    """Persist inverter list to JSON file."""
+def _write_inverters_atomic(configs: List[InverterConfig]):
+    """Write config to a temp file, then atomically replace INVERTERS_FILE.
+    The backup always holds the latest written config so a lost main file can be fully restored."""
+    tmp = INVERTERS_FILE + ".tmp"
     try:
-        with open(INVERTERS_FILE, "w") as f:
+        os.makedirs(os.path.dirname(INVERTERS_FILE) or ".", exist_ok=True)
+        with open(tmp, "w") as f:
             json.dump([asdict(c) for c in configs], f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp, INVERTERS_FILE)       # atomic on POSIX
+
+        # Backup reflects the just-written (latest) config for rollback/recovery
+        shutil.copy2(INVERTERS_FILE, INVERTERS_BACKUP)
         logger.debug(f"Saved {len(configs)} inverters to {INVERTERS_FILE}")
     except Exception as e:
         logger.error(f"Failed to save inverters: {e}")
+
+
+def save_inverters(configs: List[InverterConfig]):
+    """Persist inverter list (atomic, backup-kept, serializer-safe)."""
+    _write_inverters_atomic(configs)
 
 
 # ---------------------------------------------------------------------------
@@ -613,19 +665,20 @@ async def get_inverters():
 
 @app.post("/api/inverters")
 async def add_inverter(body: dict):
-    configs = load_inverters()
-    name = body.get("name", "").strip()
-    host = body.get("host", "").strip()
-    mqtt_enabled = body.get("mqtt_enabled", False)
+    async with config_lock:
+        configs = load_inverters()
+        name = body.get("name", "").strip()
+        host = body.get("host", "").strip()
+        mqtt_enabled = body.get("mqtt_enabled", False)
 
-    if not name or not host:
-        return {"error": "name and host required"}
-    if any(c.name == name for c in configs):
-        return {"error": f"inverter '{name}' already exists"}
+        if not name or not host:
+            return {"error": "name and host required"}
+        if any(c.name == name for c in configs):
+            return {"error": f"inverter '{name}' already exists"}
 
-    new_cfg = InverterConfig(name=name, host=host, mqtt_enabled=mqtt_enabled)
-    configs.append(new_cfg)
-    save_inverters(configs)
+        new_cfg = InverterConfig(name=name, host=host, mqtt_enabled=mqtt_enabled)
+        configs.append(new_cfg)
+        save_inverters(configs)
 
     writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
     start_inverter_tasks(new_cfg, writer)
@@ -635,30 +688,36 @@ async def add_inverter(body: dict):
 
 @app.delete("/api/inverters/{name}")
 async def delete_inverter(name: str):
-    configs = load_inverters()
-    configs = [c for c in configs if c.name != name]
-    save_inverters(configs)
-    stop_inverter_tasks(name)
+    async with config_lock:
+        configs = [c for c in load_inverters() if c.name != name]
+        save_inverters(configs)
+        stop_inverter_tasks(name)
     return {"ok": True}
 
 
 @app.patch("/api/inverters/{name}")
 async def update_inverter(name: str, body: dict):
-    configs = load_inverters()
-    for c in configs:
-        if c.name == name:
-            if "mqtt_enabled" in body:
-                c.mqtt_enabled = body["mqtt_enabled"]
-            if "host" in body:
-                c.host = body["host"]
-            break
-    else:
-        return {"error": "not found"}
+    async with config_lock:
+        configs = load_inverters()
+        target = None
+        for c in configs:
+            if c.name == name:
+                target = c
+                break
 
-    save_inverters(configs)
-    stop_inverter_tasks(name)
+        if target is None:
+            return {"error": "not found"}
+
+        if "mqtt_enabled" in body:
+            target.mqtt_enabled = body["mqtt_enabled"]
+        if "host" in body:
+            target.host = body["host"]
+
+        save_inverters(configs)
+        stop_inverter_tasks(name)
+
     writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
-    start_inverter_tasks(c, writer)
+    start_inverter_tasks(target, writer)
     return {"ok": True}
 
 
