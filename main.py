@@ -72,17 +72,29 @@ app = FastAPI(title="fronius2vim", version="2.0.0")
 # ---------------------------------------------------------------------------
 # Inverter config
 # ---------------------------------------------------------------------------
+INVERTER_MODELS = ("auto", "day_energy", "total_energy")
+
+
+def normalize_model(model: str) -> str:
+    """Return a valid inverter model, falling back to 'auto'."""
+    if model in INVERTER_MODELS:
+        return model
+    return "auto"
+
+
 @dataclass
 class InverterConfig:
     name: str
     host: str
     mqtt_enabled: bool = False
     mqtt_topic: str = ""
+    model: str = "auto"
 
     def __post_init__(self):
         if not self.mqtt_topic:
             slug = re.sub(r"[^a-z0-9]+", "-", self.name.lower()).strip("-")
             self.mqtt_topic = f"froniusalt/{slug}/power"
+        self.model = normalize_model(self.model)
 
 
 def load_inverters() -> List[InverterConfig]:
@@ -271,7 +283,7 @@ class FroniusCollector:
             logger.debug(f"[{self.host}] Common inverter data fallback error: {e}")
         return None
 
-    async def get_energy_data(self) -> Optional[Dict]:
+    async def get_energy_data(self, model: str = "auto") -> Optional[Dict]:
         url = f"{self.base_url}/GetInverterRealtimeData.cgi"
         params = {"Scope": "System", "DataCollection": "CumulationInverterData"}
         try:
@@ -282,7 +294,9 @@ class FroniusCollector:
             yearly = extract_metric_value(body.get("YEAR_ENERGY"))
             total = extract_metric_value(body.get("TOTAL_ENERGY"))
 
-            if daily == 0.0:
+            # Only bother with fallbacks for inverters that lack native DAY_ENERGY
+            # in auto mode. Explicit total_energy models (Gen24/Verto/Tauro) skip them.
+            if model != "total_energy" and daily == 0.0:
                 alt = await self._get_power_flow_energy()
                 if not alt or alt.get("daily", 0.0) == 0.0:
                     alt = await self._get_common_inverter_energy()
@@ -476,20 +490,24 @@ async def get_midnight_baseline_total(name: str, writer_url: str) -> Optional[fl
     return None
 
 
-async def calculate_daily_energy(name: str, day_energy: float, total_energy: float, writer_url: str) -> float:
-    """Calculate daily energy. Uses native DAY_ENERGY if provided (Symo/Primo), or derives from TOTAL_ENERGY (Gen24/Verto)."""
+async def calculate_daily_energy(name: str, day_energy: float, total_energy: float, writer_url: str, model: str = "auto") -> float:
+    """Calculate daily energy (Wh). Uses native DAY_ENERGY for Symo/Primo-like
+    inverters, or derives it from TOTAL_ENERGY deltas for Gen24/Verto/Tauro
+    which only expose TOTAL_ENERGY. 'model' may force either strategy."""
+    day_energy = day_energy or 0.0
+    total_energy = total_energy or 0.0
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Native DAY_ENERGY provided by inverter
-    if day_energy and day_energy > 0:
-        if total_energy and total_energy > 0:
+    # Native DAY_ENERGY provided by inverter (Symo/Primo, or auto-detected)
+    if day_energy > 0 and model != "total_energy":
+        if total_energy > 0:
             midnight_baselines[name] = {"date": today, "total": total_energy - day_energy}
         return day_energy
 
-    # Derive from TOTAL_ENERGY
-    if total_energy and total_energy > 0:
+    # Derive from TOTAL_ENERGY (only option for Gen24/Verto/Tauro)
+    if total_energy > 0:
         base = midnight_baselines.get(name)
-        if base and base.get("date") == today:
+        if base and base.get("date") == today and total_energy >= base["total"]:
             return max(0.0, total_energy - base["total"])
 
         # Fetch baseline from VictoriaMetrics for today
@@ -507,7 +525,7 @@ async def calculate_daily_energy(name: str, day_energy: float, total_energy: flo
 # ---------------------------------------------------------------------------
 # Per-inverter background tasks
 # ---------------------------------------------------------------------------
-async def realtime_collector(name: str, collector: FroniusCollector, writer: VictoriaMetricsWriter, mqtt_pub: Optional[MqttPublisher]):
+async def realtime_collector(name: str, collector: FroniusCollector, writer: VictoriaMetricsWriter, mqtt_pub: Optional[MqttPublisher], model: str = "auto"):
     while True:
         try:
             data = await collector.get_realtime_data()
@@ -517,8 +535,8 @@ async def realtime_collector(name: str, collector: FroniusCollector, writer: Vic
                 if mqtt_pub:
                     mqtt_pub.publish_power(power)
 
-                # Calculate live daily energy
-                daily = await calculate_daily_energy(name, data.get("day_energy", 0.0), data.get("total_energy", 0.0), VICTORIAMETRICS_URL)
+                # Calculate live daily energy (native DAY_ENERGY or TOTAL_ENERGY delta)
+                daily = await calculate_daily_energy(name, data.get("day_energy", 0.0), data.get("total_energy", 0.0), VICTORIAMETRICS_URL, model)
 
                 inverters_data[name] = {
                     **inverters_data.get(name, {}),
@@ -536,15 +554,15 @@ async def realtime_collector(name: str, collector: FroniusCollector, writer: Vic
         await asyncio.sleep(REALTIME_INTERVAL)
 
 
-async def energy_collector(name: str, collector: FroniusCollector, writer: VictoriaMetricsWriter):
+async def energy_collector(name: str, collector: FroniusCollector, writer: VictoriaMetricsWriter, model: str = "auto"):
     while True:
         try:
-            data = await collector.get_energy_data()
+            data = await collector.get_energy_data(model)
             if data:
                 daily = data.get("daily", 0.0)
                 total = data.get("total", 0.0)
                 if (daily is None or daily == 0.0) and total and total > 0:
-                    daily = await calculate_daily_energy(name, 0.0, total, VICTORIAMETRICS_URL)
+                    daily = await calculate_daily_energy(name, 0.0, total, VICTORIAMETRICS_URL, model)
 
                 await writer.write_metric("fronius_daily_energy_watthours", daily or 0.0, {"inverter": name})
                 await writer.write_metric("fronius_yearly_energy_watthours", data.get("yearly") or 0.0, {"inverter": name})
@@ -575,10 +593,10 @@ def start_inverter_tasks(config: InverterConfig, writer: VictoriaMetricsWriter):
 
     inverters_data[config.name] = {"power": 0, "daily_energy": 0, "online": False, "timestamp": ""}
 
-    t1 = asyncio.create_task(realtime_collector(config.name, collector, writer, mqtt_pub))
-    t2 = asyncio.create_task(energy_collector(config.name, collector, writer))
+    t1 = asyncio.create_task(realtime_collector(config.name, collector, writer, mqtt_pub, config.model))
+    t2 = asyncio.create_task(energy_collector(config.name, collector, writer, config.model))
     collector_tasks[config.name] = [t1, t2]
-    logger.info(f"Started collector for '{config.name}' ({config.host}) mqtt={config.mqtt_enabled}")
+    logger.info(f"Started collector for '{config.name}' ({config.host}) model={config.model} mqtt={config.mqtt_enabled}")
 
 
 def stop_inverter_tasks(name: str):
@@ -786,13 +804,18 @@ HTML_ADMIN = """
 <div class="wrap">
     <h1>Inverter Management <a href="/">back to dashboard</a></h1>
     <table>
-        <thead><tr><th>Name</th><th>IP</th><th>MQTT</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>IP</th><th>Model</th><th>MQTT</th><th>Status</th><th></th></tr></thead>
         <tbody id="invTable"></tbody>
     </table>
     <div class="form-card">
         <h2 id="formTitle">Add Inverter</h2>
         <div class="field"><label>Name</label><input id="fName" placeholder="e.g. Verto1-37123716"></div>
         <div class="field"><label>IP Address</label><input id="fHost" placeholder="e.g. 172.20.204.102"></div>
+        <div class="field"><label>Inverter Model</label><select id="fModel">
+            <option value="auto" selected>Auto-detect (recommended)</option>
+            <option value="day_energy">Symo / Primo / legacy — native DAY_ENERGY</option>
+            <option value="total_energy">Gen24 / Verto / Tauro — TOTAL_ENERGY only</option>
+        </select></div>
         <div class="field"><label>Publish to MQTT</label><select id="fMqtt"><option value="false">No</option><option value="true">Yes</option></select></div>
         <div class="actions"><button class="btn btn-save" id="saveLabel" onclick="addInverter()">Add Inverter</button> <button class="btn btn-edit" id="cancelBtn" style="display:none" onclick="cancelEdit()">Cancel</button></div>
     </div>
@@ -800,13 +823,14 @@ HTML_ADMIN = """
 <script>
 let inverters=[];
 async function load(){const r=await fetch('/api/inverters');inverters=await r.json();render()}
-function render(){document.getElementById('invTable').innerHTML=inverters.map((inv,i)=>{const st=inv.online?'on':(inv.host?'off':'na');const stl=inv.online?'Online':(inv.host?'Offline':'?');return `<tr><td><strong>${inv.name}</strong></td><td>${inv.host}</td><td>${inv.mqtt_enabled?'<span style="color:#16a34a">Yes</span>':'<span style="color:#93949e">No</span>'}</td><td><span class="dot ${st}"></span>${stl}</td><td><button class="btn btn-edit" onclick="editInverter(${i})">Edit</button> <button class="btn btn-del" onclick="delInverter(${i})">Remove</button></td></tr>`}).join('')}
+const modelLabels={'auto':'Auto-detect','day_energy':'DAY_ENERGY','total_energy':'TOTAL_ENERGY'};
+function render(){document.getElementById('invTable').innerHTML=inverters.map((inv,i)=>{const st=inv.online?'on':(inv.host?'off':'na');const stl=inv.online?'Online':(inv.host?'Offline':'?');return `<tr><td><strong>${inv.name}</strong></td><td>${inv.host}</td><td>${modelLabels[inv.model]||inv.model}</td><td>${inv.mqtt_enabled?'<span style="color:#16a34a">Yes</span>':'<span style="color:#93949e">No</span>'}</td><td><span class="dot ${st}"></span>${stl}</td><td><button class="btn btn-edit" onclick="editInverter(${i})">Edit</button> <button class="btn btn-del" onclick="delInverter(${i})">Remove</button></td></tr>`}).join('')}
 let editingIdx=null;
-function editInverter(i){editingIdx=i;const inv=inverters[i];document.getElementById('fName').value=inv.name;document.getElementById('fHost').value=inv.host;document.getElementById('fMqtt').value=inv.mqtt_enabled?'true':'false';document.getElementById('formTitle').textContent='Edit Inverter';document.getElementById('saveLabel').textContent='Save Changes';document.getElementById('cancelBtn').style.display='inline-block';window.scrollTo({top:0,behavior:'smooth'})}
-function cancelEdit(){editingIdx=null;document.getElementById('fName').value='';document.getElementById('fHost').value='';document.getElementById('formTitle').textContent='Add Inverter';document.getElementById('saveLabel').textContent='Add Inverter';document.getElementById('cancelBtn').style.display='none'}
-async function addInverter(){const n=document.getElementById('fName').value.trim();const h=document.getElementById('fHost').value.trim();const m=document.getElementById('fMqtt').value==='true';if(!n||!h)return alert('Name and IP required');
-  if(editingIdx!==null){await fetch('/api/inverters/'+encodeURIComponent(inverters[editingIdx].name),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m})});editingIdx=null}
-  else{await fetch('/api/inverters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m})})}
+function editInverter(i){editingIdx=i;const inv=inverters[i];document.getElementById('fName').value=inv.name;document.getElementById('fHost').value=inv.host;document.getElementById('fModel').value=inv.model||'auto';document.getElementById('fMqtt').value=inv.mqtt_enabled?'true':'false';document.getElementById('formTitle').textContent='Edit Inverter';document.getElementById('saveLabel').textContent='Save Changes';document.getElementById('cancelBtn').style.display='inline-block';window.scrollTo({top:0,behavior:'smooth'})}
+function cancelEdit(){editingIdx=null;document.getElementById('fName').value='';document.getElementById('fHost').value='';document.getElementById('fModel').value='auto';document.getElementById('fMqtt').value='false';document.getElementById('formTitle').textContent='Add Inverter';document.getElementById('saveLabel').textContent='Add Inverter';document.getElementById('cancelBtn').style.display='none'}
+async function addInverter(){const n=document.getElementById('fName').value.trim();const h=document.getElementById('fHost').value.trim();const m=document.getElementById('fMqtt').value==='true';const model=document.getElementById('fModel').value;if(!n||!h)return alert('Name and IP required');
+  if(editingIdx!==null){await fetch('/api/inverters/'+encodeURIComponent(inverters[editingIdx].name),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m,model})});editingIdx=null}
+  else{await fetch('/api/inverters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,host:h,mqtt_enabled:m,model})})}
   cancelEdit();load()}
 async function delInverter(i){if(!confirm('Remove '+inverters[i].name+'?'))return;await fetch('/api/inverters/'+encodeURIComponent(inverters[i].name),{method:'DELETE'});load()}
 load();setInterval(load,5000);
@@ -847,6 +871,7 @@ async def get_inverters():
             "host": c.host,
             "mqtt_enabled": c.mqtt_enabled,
             "mqtt_topic": c.mqtt_topic,
+            "model": c.model,
             "online": inverters_data.get(c.name, {}).get("online", False),
         })
     return result
@@ -859,13 +884,14 @@ async def add_inverter(body: dict):
         name = body.get("name", "").strip()
         host = body.get("host", "").strip()
         mqtt_enabled = body.get("mqtt_enabled", False)
+        model = normalize_model(body.get("model", "auto"))
 
         if not name or not host:
             return {"error": "name and host required"}
         if any(c.name == name for c in configs):
             return {"error": f"inverter '{name}' already exists"}
 
-        new_cfg = InverterConfig(name=name, host=host, mqtt_enabled=mqtt_enabled)
+        new_cfg = InverterConfig(name=name, host=host, mqtt_enabled=mqtt_enabled, model=model)
         configs.append(new_cfg)
         save_inverters(configs)
 
@@ -903,6 +929,8 @@ async def update_inverter(name: str, body: dict):
             target.host = body["host"]
         if "name" in body and body["name"].strip():
             target.name = body["name"].strip()
+        if "model" in body:
+            target.model = normalize_model(body["model"])
 
         save_inverters(configs)
         stop_inverter_tasks(name)
