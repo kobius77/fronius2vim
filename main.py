@@ -13,6 +13,7 @@ import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -29,6 +30,10 @@ REALTIME_INTERVAL = int(os.getenv("REALTIME_INTERVAL", "10"))
 ENERGY_INTERVAL = int(os.getenv("ENERGY_INTERVAL", "900"))
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Display timezone for charts / daily baselines (Europe/Vienna handles DST automatically)
+LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "Europe/Vienna")
+LOCAL_TZ = ZoneInfo(LOCAL_TIMEZONE)
 
 # MQTT global config (broker connection params)
 MQTT_HOST = os.getenv("MQTT_HOST", "").strip().strip("\"'")
@@ -451,7 +456,7 @@ midnight_baselines: Dict[str, Dict[str, Any]] = {}
 async def get_midnight_baseline_total(name: str, writer_url: str) -> Optional[float]:
     """Fetch the total_energy reading at midnight (start of today) from VictoriaMetrics."""
     try:
-        now = datetime.now()
+        now = datetime.now(LOCAL_TZ)
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         start_ts = int(start_of_day.timestamp())
 
@@ -496,7 +501,7 @@ async def calculate_daily_energy(name: str, day_energy: float, total_energy: flo
     which only expose TOTAL_ENERGY. 'model' may force either strategy."""
     day_energy = day_energy or 0.0
     total_energy = total_energy or 0.0
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
 
     # Native DAY_ENERGY provided by inverter (Symo/Primo, or auto-detected)
     if day_energy > 0 and model != "total_energy":
@@ -1049,7 +1054,7 @@ async def get_today():
             hourly, cur = {}, 0.0
             for ts in all_ts:
                 cur += per15.get(ts, 0.0)
-                if datetime.fromtimestamp(ts).minute == 0:
+                if datetime.fromtimestamp(ts, LOCAL_TZ).minute == 0:
                     hourly[ts - 1800] = round(cur, 2)
                     cur = 0.0
             if cur > 0 and all_ts:
@@ -1061,7 +1066,7 @@ async def get_today():
                 "power_kw": [round(ppts.get(ts, 0.0) / 1000, 2) for ts in all_ts],
             })
 
-        times = [datetime.fromtimestamp(ts).strftime("%H:%M") for ts in all_ts]
+        times = [datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%H:%M") for ts in all_ts]
         return {"times": times, "series": series_out}
     except Exception as e:
         logger.error(f"Failed to fetch today data: {e}")
@@ -1074,7 +1079,7 @@ async def get_7day_history():
         configs = load_inverters()
         active_names = [c.name for c in configs]
 
-        now = datetime.now()
+        now = datetime.now(LOCAL_TZ)
         days_list = []
         for i in range(6, -1, -1):
             day = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1104,7 +1109,7 @@ async def get_7day_history():
                     per_inverter[name] = {}
                 for v in result.get("values", []):
                     ts, wh = int(v[0]), float(v[1])
-                    day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    day_key = datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%Y-%m-%d")
                     per_inverter[name][day_key] = max(per_inverter[name].get(day_key, 0.0), wh)
 
         # Merge total_energy max-min per day
@@ -1120,7 +1125,7 @@ async def get_7day_history():
                 totals_by_day = {}
                 for v in result.get("values", []):
                     ts, wh = int(v[0]), float(v[1])
-                    day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    day_key = datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%Y-%m-%d")
                     if day_key not in totals_by_day:
                         totals_by_day[day_key] = []
                     totals_by_day[day_key].append(wh)
@@ -1137,7 +1142,7 @@ async def get_7day_history():
             by_day = per_inverter.get(name, {})
             kwhs = []
             for d in days_list:
-                day_key = datetime.fromtimestamp(d["start_ts"]).strftime("%Y-%m-%d")
+                day_key = datetime.fromtimestamp(d["start_ts"], LOCAL_TZ).strftime("%Y-%m-%d")
                 kwhs.append(round(by_day.get(day_key, 0.0) / 1000, 2))
             series_out.append({"name": name, "kwh": kwhs})
 
