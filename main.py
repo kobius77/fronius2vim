@@ -218,6 +218,54 @@ class FroniusCollector:
             logger.error(f"[{self.host}] Failed to get realtime data: {e}")
             return None
 
+    async def _get_power_flow_energy(self) -> Optional[Dict]:
+        try:
+            url = f"{self.base_url}/GetPowerFlowRealtimeData.cgi"
+            response = await self.client.get(url)
+            if response.status_code == 200:
+                data = response.json().get("Body", {}).get("Data", {})
+                site = data.get("Site", {})
+                e_day = site.get("E_Day")
+                e_year = site.get("E_Year")
+                e_total = site.get("E_Total")
+
+                if e_day is None:
+                    inverters = data.get("Inverters", {})
+                    if isinstance(inverters, dict):
+                        e_day = sum(float(inv.get("E_Day") or 0) for inv in inverters.values())
+                        e_year = sum(float(inv.get("E_Year") or 0) for inv in inverters.values())
+                        e_total = sum(float(inv.get("E_Total") or 0) for inv in inverters.values())
+
+                if e_day is not None or e_total is not None:
+                    return {
+                        "daily": float(e_day) if e_day is not None else 0.0,
+                        "yearly": float(e_year) if e_year is not None else 0.0,
+                        "total": float(e_total) if e_total is not None else 0.0,
+                    }
+        except Exception as e:
+            logger.debug(f"[{self.host}] Power flow fallback error: {e}")
+        return None
+
+    async def _get_common_inverter_energy(self) -> Optional[Dict]:
+        try:
+            url = f"{self.base_url}/GetInverterRealtimeData.cgi"
+            for dev_id in ["1", "0", "2"]:
+                response = await self.client.get(
+                    url,
+                    params={"Scope": "Device", "DataCollection": "CommonInverterData", "DeviceId": dev_id},
+                )
+                if response.status_code == 200:
+                    data = response.json().get("Body", {}).get("Data", {})
+                    if data:
+                        daily = extract_metric_value(data.get("DAY_ENERGY"))
+                        yearly = extract_metric_value(data.get("YEAR_ENERGY"))
+                        total = extract_metric_value(data.get("TOTAL_ENERGY"))
+                        if daily > 0 or total > 0:
+                            return {"daily": daily, "yearly": yearly, "total": total}
+        except Exception as e:
+            logger.debug(f"[{self.host}] Common inverter data fallback error: {e}")
+        return None
+
     async def get_energy_data(self) -> Optional[Dict]:
         url = f"{self.base_url}/GetInverterRealtimeData.cgi"
         params = {"Scope": "System", "DataCollection": "CumulationInverterData"}
@@ -225,13 +273,32 @@ class FroniusCollector:
             response = await self.client.get(url, params=params)
             response.raise_for_status()
             body = response.json().get("Body", {}).get("Data", {})
+            daily = extract_metric_value(body.get("DAY_ENERGY"))
+            yearly = extract_metric_value(body.get("YEAR_ENERGY"))
+            total = extract_metric_value(body.get("TOTAL_ENERGY"))
+
+            if daily == 0.0:
+                alt = await self._get_power_flow_energy()
+                if not alt or alt.get("daily", 0.0) == 0.0:
+                    alt = await self._get_common_inverter_energy()
+                if alt:
+                    if daily == 0.0 and alt.get("daily", 0.0) > 0:
+                        daily = alt["daily"]
+                    if yearly == 0.0 and alt.get("yearly", 0.0) > 0:
+                        yearly = alt["yearly"]
+                    if total == 0.0 and alt.get("total", 0.0) > 0:
+                        total = alt["total"]
+
             return {
-                "daily": extract_metric_value(body.get("DAY_ENERGY")),
-                "yearly": extract_metric_value(body.get("YEAR_ENERGY")),
-                "total": extract_metric_value(body.get("TOTAL_ENERGY")),
+                "daily": daily,
+                "yearly": yearly,
+                "total": total,
             }
         except Exception as e:
             logger.error(f"[{self.host}] Failed to get energy data: {e}")
+            alt = await self._get_power_flow_energy()
+            if alt:
+                return alt
             return None
 
 
@@ -525,19 +592,49 @@ HTML_DASHBOARD = """
     <script>
         const ctx = document.getElementById('combinedChart').getContext('2d');
         const combinedChart = new Chart(ctx, {
-            data:{labels:[],datasets:[]},
-            options:{responsive:true,maintainAspectRatio:true,interaction:{mode:'index',intersect:false},scales:{y:{type:'linear',position:'left',beginAtZero:true,stacked:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#6b7280',font:{size:11}}},y1:{type:'linear',position:'right',beginAtZero:true,max:35,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}},x:{stacked:true,grid:{display:false},ticks:{color:'#6b7280',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12}}},plugins:{legend:{display:false}}}
+            type: 'bar',
+            data: {labels:[], datasets:[]},
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                interaction: {mode: 'index', intersect: false},
+                scales: {
+                    y: {
+                        type: 'linear',
+                        position: 'left',
+                        beginAtZero: true,
+                        stacked: true,
+                        grid: {color: 'rgba(0,0,0,.04)', drawBorder: false},
+                        ticks: {color: '#6b7280', font: {size: 11}}
+                    },
+                    y1: {
+                        type: 'linear',
+                        position: 'right',
+                        beginAtZero: true,
+                        max: 35,
+                        grid: {display: false},
+                        ticks: {color: '#93949e', font: {size: 11}}
+                    },
+                    x: {
+                        type: 'category',
+                        stacked: true,
+                        grid: {display: false},
+                        ticks: {color: '#6b7280', font: {size: 11}, maxRotation: 45, autoSkip: true, maxTicksLimit: 12}
+                    }
+                },
+                plugins: {legend: {display: false}}
+            }
         });
         const PALETTE=['#0fde41','#faf000','#0ea5e9','#f97316','#a855f7','#ef4444','#14b8a6','#84cc16'];
-        async function fetchCombinedData(){try{const r=await fetch('/api/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:3,stack:'e'});combinedChart.data.datasets.push({type:'line',label:s.name+' (power)',data:s.power_kw,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1'})});combinedChart.update();document.getElementById('todayLegend').innerHTML=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
+        async function fetchCombinedData(){try{const r=await fetch('/api/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (power)',data:s.power_kw,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchCombinedData();setInterval(fetchCombinedData,300000);
 
         const sCtx = document.getElementById('sevenDayChart').getContext('2d');
         const sevenDayChart = new Chart(sCtx, {
             type:'bar',data:{labels:[],datasets:[]},
-            options:{responsive:true,maintainAspectRatio:true,scales:{y:{beginAtZero:true,stacked:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#93949e',font:{size:11}}},x:{stacked:true,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}}},plugins:{legend:{display:false}}}
+            options:{responsive:true,maintainAspectRatio:true,scales:{y:{beginAtZero:true,stacked:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#93949e',font:{size:11}}},x:{type:'category',stacked:true,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}}},plugins:{legend:{display:false}}}
         });
-        async function fetchSevenDay(){try{const r=await fetch('/api/history/7days');const d=await r.json();if(d.days&&d.days.length&&d.series&&d.series.length){sevenDayChart.data.labels=d.days;sevenDayChart.data.datasets=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return {label:s.name,data:s.kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:4,stack:'es'}});sevenDayChart.update()}}catch(e){}}
+        async function fetchSevenDay(){try{const r=await fetch('/api/history/7days');const d=await r.json();if(d.days&&d.days.length&&d.series&&d.series.length){sevenDayChart.data.labels=d.days;sevenDayChart.data.datasets=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return {label:s.name,data:s.kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:4,stack:'energy'}});sevenDayChart.update()}}catch(e){}}
         fetchSevenDay();setInterval(fetchSevenDay,3600000);
 
         let ws;
@@ -726,9 +823,29 @@ async def update_inverter(name: str, body: dict):
     return {"ok": True}
 
 
+def resolve_inverter_name(raw_name: Optional[str], active_names: List[str]) -> Optional[str]:
+    """Map raw metric labels (including legacy 'system' or whitespace variants) to active inverters."""
+    if not active_names:
+        return raw_name or "unknown"
+    if not raw_name:
+        return active_names[0]
+    if raw_name in active_names:
+        return raw_name
+    if raw_name.lower() in ("system", "unknown", "default"):
+        return active_names[0]
+    norm_raw = raw_name.replace(" ", "").lower()
+    for name in active_names:
+        if name.replace(" ", "").lower() == norm_raw:
+            return name
+    return None
+
+
 @app.get("/api/today")
 async def get_today():
     try:
+        configs = load_inverters()
+        active_names = [c.name for c in configs]
+
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         start_24h_utc = now_utc - timedelta(hours=24)
         start_ts = int(start_24h_utc.timestamp())
@@ -743,31 +860,36 @@ async def get_today():
             p_res.raise_for_status()
             e_data, p_data = e_res.json(), p_res.json()
 
-        e_series = {}
+        e_series = {name: {} for name in active_names}
         if e_data.get("status") == "success":
             for result in e_data.get("data", {}).get("result", []):
-                name = (result.get("metric") or {}).get("inverter", "unknown")
+                raw_name = (result.get("metric") or {}).get("inverter", "")
+                name = resolve_inverter_name(raw_name, active_names)
+                if not name:
+                    continue
+                if name not in e_series:
+                    e_series[name] = {}
                 values = result.get("values", [])
-                per15 = {}
                 for i in range(1, len(values)):
                     ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
                     kwh = (curr - prev) / 1000
                     if kwh >= 0:
-                        per15[ts] = kwh
-                if per15:
-                    e_series[name] = per15
+                        e_series[name][ts] = max(e_series[name].get(ts, 0.0), kwh)
 
-        p_series = {}
+        p_series = {name: {} for name in active_names}
         if p_data.get("status") == "success":
             for result in p_data.get("data", {}).get("result", []):
-                name = (result.get("metric") or {}).get("inverter", "unknown")
-                pts = {}
+                raw_name = (result.get("metric") or {}).get("inverter", "")
+                name = resolve_inverter_name(raw_name, active_names)
+                if not name:
+                    continue
+                if name not in p_series:
+                    p_series[name] = {}
                 for v in result.get("values", []):
-                    pts[int(v[0])] = round(float(v[1]), 0)
-                if pts:
-                    p_series[name] = pts
+                    ts = int(v[0])
+                    val = round(float(v[1]), 0)
+                    p_series[name][ts] = max(p_series[name].get(ts, 0.0), val)
 
-        names = sorted(set(e_series.keys()) | set(p_series.keys()))
         all_ts_set = set()
         for d in e_series.values():
             all_ts_set.update(d)
@@ -776,7 +898,7 @@ async def get_today():
         all_ts = sorted(all_ts_set)
 
         series_out = []
-        for name in names:
+        for name in active_names:
             per15 = e_series.get(name, {})
             ppts = p_series.get(name, {})
             hourly, cur = {}, 0.0
@@ -801,6 +923,9 @@ async def get_today():
 @app.get("/api/history/7days")
 async def get_7day_history():
     try:
+        configs = load_inverters()
+        active_names = [c.name for c in configs]
+
         now = datetime.now()
         days_list = []
         for i in range(6, -1, -1):
@@ -815,21 +940,24 @@ async def get_7day_history():
             resp.raise_for_status()
             data = resp.json()
 
-        per_inverter = {}
+        per_inverter = {name: {} for name in active_names}
         if data.get("status") == "success":
             for result in data.get("data", {}).get("result", []):
-                name = (result.get("metric") or {}).get("inverter", "unknown")
-                by_day = {}
+                raw_name = (result.get("metric") or {}).get("inverter", "")
+                name = resolve_inverter_name(raw_name, active_names)
+                if not name:
+                    continue
+                if name not in per_inverter:
+                    per_inverter[name] = {}
                 for v in result.get("values", []):
                     ts, wh = int(v[0]), float(v[1])
                     day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-                    by_day[day_key] = max(by_day.get(day_key, 0.0), wh)
-                if by_day:
-                    per_inverter[name] = by_day
+                    per_inverter[name][day_key] = max(per_inverter[name].get(day_key, 0.0), wh)
 
         labels = [d["date"] for d in days_list]
         series_out = []
-        for name, by_day in per_inverter.items():
+        for name in active_names:
+            by_day = per_inverter.get(name, {})
             kwhs = []
             for d in days_list:
                 day_key = datetime.fromtimestamp(d["start_ts"]).strftime("%Y-%m-%d")
