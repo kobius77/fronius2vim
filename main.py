@@ -213,7 +213,12 @@ class FroniusCollector:
             response = await self.client.get(url, params=params)
             response.raise_for_status()
             body = response.json().get("Body", {}).get("Data", {})
-            return {"power": extract_metric_value(body.get("PAC"))}
+            return {
+                "power": extract_metric_value(body.get("PAC")),
+                "day_energy": extract_metric_value(body.get("DAY_ENERGY")),
+                "year_energy": extract_metric_value(body.get("YEAR_ENERGY")),
+                "total_energy": extract_metric_value(body.get("TOTAL_ENERGY")),
+            }
         except Exception as e:
             logger.error(f"[{self.host}] Failed to get realtime data: {e}")
             return None
@@ -426,6 +431,79 @@ collector_tasks: Dict[str, List[asyncio.Task]] = {}
 mqtt_publishers: Dict[str, MqttPublisher] = {}
 
 
+midnight_baselines: Dict[str, Dict[str, Any]] = {}
+
+
+async def get_midnight_baseline_total(name: str, writer_url: str) -> Optional[float]:
+    """Fetch the total_energy reading at midnight (start of today) from VictoriaMetrics."""
+    try:
+        now = datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ts = int(start_of_day.timestamp())
+
+        # 1. Point query at start of today
+        query_url = f"{writer_url}/api/v1/query"
+        params = {"query": f'fronius_total_energy_watthours{{inverter="{name}"}}', "time": str(start_ts)}
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(query_url, params=params)
+            if resp.status_code == 200:
+                result = resp.json().get("data", {}).get("result", [])
+                if result:
+                    val = float(result[0].get("value", [0, 0])[1])
+                    if val > 0:
+                        return val
+
+        # 2. Range query for the first recorded point today
+        range_url = f"{writer_url}/api/v1/query_range"
+        range_params = {
+            "query": f'fronius_total_energy_watthours{{inverter="{name}"}}',
+            "start": str(start_ts),
+            "end": str(int(now.timestamp())),
+            "step": "15m",
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(range_url, params=range_params)
+            if resp.status_code == 200:
+                result = resp.json().get("data", {}).get("result", [])
+                if result:
+                    values = result[0].get("values", [])
+                    if values:
+                        val = float(values[0][1])
+                        if val > 0:
+                            return val
+    except Exception as e:
+        logger.debug(f"[{name}] Could not fetch baseline total from VM: {e}")
+    return None
+
+
+async def calculate_daily_energy(name: str, day_energy: float, total_energy: float, writer_url: str) -> float:
+    """Calculate daily energy. Uses native DAY_ENERGY if provided (Symo/Primo), or derives from TOTAL_ENERGY (Gen24/Verto)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Native DAY_ENERGY provided by inverter
+    if day_energy and day_energy > 0:
+        if total_energy and total_energy > 0:
+            midnight_baselines[name] = {"date": today, "total": total_energy - day_energy}
+        return day_energy
+
+    # Derive from TOTAL_ENERGY
+    if total_energy and total_energy > 0:
+        base = midnight_baselines.get(name)
+        if base and base.get("date") == today:
+            return max(0.0, total_energy - base["total"])
+
+        # Fetch baseline from VictoriaMetrics for today
+        vm_base = await get_midnight_baseline_total(name, writer_url)
+        if vm_base is not None and vm_base > 0 and vm_base <= total_energy:
+            midnight_baselines[name] = {"date": today, "total": vm_base}
+            return max(0.0, total_energy - vm_base)
+        else:
+            midnight_baselines[name] = {"date": today, "total": total_energy}
+            return 0.0
+
+    return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Per-inverter background tasks
 # ---------------------------------------------------------------------------
@@ -434,12 +512,18 @@ async def realtime_collector(name: str, collector: FroniusCollector, writer: Vic
         try:
             data = await collector.get_realtime_data()
             if data:
-                await writer.write_metric("fronius_power_watts", data["power"], {"inverter": name})
+                power = data["power"]
+                await writer.write_metric("fronius_power_watts", power, {"inverter": name})
                 if mqtt_pub:
-                    mqtt_pub.publish_power(data["power"])
+                    mqtt_pub.publish_power(power)
+
+                # Calculate live daily energy
+                daily = await calculate_daily_energy(name, data.get("day_energy", 0.0), data.get("total_energy", 0.0), VICTORIAMETRICS_URL)
+
                 inverters_data[name] = {
                     **inverters_data.get(name, {}),
-                    "power": data["power"],
+                    "power": power,
+                    "daily_energy": daily,
                     "online": True,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
@@ -457,12 +541,17 @@ async def energy_collector(name: str, collector: FroniusCollector, writer: Victo
         try:
             data = await collector.get_energy_data()
             if data:
-                await writer.write_metric("fronius_daily_energy_watthours", data["daily"], {"inverter": name})
-                await writer.write_metric("fronius_yearly_energy_watthours", data["yearly"], {"inverter": name})
-                await writer.write_metric("fronius_total_energy_watthours", data["total"], {"inverter": name})
+                daily = data.get("daily", 0.0)
+                total = data.get("total", 0.0)
+                if (daily is None or daily == 0.0) and total and total > 0:
+                    daily = await calculate_daily_energy(name, 0.0, total, VICTORIAMETRICS_URL)
+
+                await writer.write_metric("fronius_daily_energy_watthours", daily or 0.0, {"inverter": name})
+                await writer.write_metric("fronius_yearly_energy_watthours", data.get("yearly") or 0.0, {"inverter": name})
+                await writer.write_metric("fronius_total_energy_watthours", total or 0.0, {"inverter": name})
                 inverters_data[name] = {
                     **inverters_data.get(name, {}),
-                    "daily_energy": data["daily"],
+                    "daily_energy": daily or 0.0,
                 }
         except Exception as e:
             logger.error(f"[{name}] energy error: {e}")
@@ -852,15 +941,22 @@ async def get_today():
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
 
         energy_params = {"query": "fronius_daily_energy_watthours", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
+        total_params = {"query": "fronius_total_energy_watthours", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
         power_params = {"query": "avg_over_time(fronius_power_watts[15m])", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
 
         async with httpx.AsyncClient() as client:
-            e_res, p_res = await asyncio.gather(client.get(query_url, params=energy_params), client.get(query_url, params=power_params))
+            e_res, t_res, p_res = await asyncio.gather(
+                client.get(query_url, params=energy_params),
+                client.get(query_url, params=total_params),
+                client.get(query_url, params=power_params),
+            )
             e_res.raise_for_status()
+            t_res.raise_for_status()
             p_res.raise_for_status()
-            e_data, p_data = e_res.json(), p_res.json()
+            e_data, t_data, p_data = e_res.json(), t_res.json(), p_res.json()
 
         e_series = {name: {} for name in active_names}
+        # 1. Process daily_energy metrics
         if e_data.get("status") == "success":
             for result in e_data.get("data", {}).get("result", []):
                 raw_name = (result.get("metric") or {}).get("inverter", "")
@@ -875,6 +971,23 @@ async def get_today():
                     kwh = (curr - prev) / 1000
                     if kwh >= 0:
                         e_series[name][ts] = max(e_series[name].get(ts, 0.0), kwh)
+
+        # 2. Fallback: for inverters where daily_energy had no non-zero deltas, derive from total_energy
+        if t_data.get("status") == "success":
+            for result in t_data.get("data", {}).get("result", []):
+                raw_name = (result.get("metric") or {}).get("inverter", "")
+                name = resolve_inverter_name(raw_name, active_names)
+                if not name:
+                    continue
+                if name not in e_series or sum(e_series[name].values()) == 0.0:
+                    if name not in e_series:
+                        e_series[name] = {}
+                    values = result.get("values", [])
+                    for i in range(1, len(values)):
+                        ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
+                        kwh = (curr - prev) / 1000
+                        if 0 <= kwh < 100:
+                            e_series[name][ts] = max(e_series[name].get(ts, 0.0), kwh)
 
         p_series = {name: {} for name in active_names}
         if p_data.get("status") == "success":
@@ -934,11 +1047,16 @@ async def get_7day_history():
 
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
         params = {"query": "fronius_daily_energy_watthours", "start": days_list[0]["start_ts"], "end": int(now.timestamp()), "step": "15m"}
+        total_params = {"query": "fronius_total_energy_watthours", "start": days_list[0]["start_ts"], "end": int(now.timestamp()), "step": "15m"}
 
         async with httpx.AsyncClient() as client:
-            resp = await client.get(query_url, params=params)
+            resp, t_resp = await asyncio.gather(
+                client.get(query_url, params=params),
+                client.get(query_url, params=total_params),
+            )
             resp.raise_for_status()
-            data = resp.json()
+            t_resp.raise_for_status()
+            data, t_data = resp.json(), t_resp.json()
 
         per_inverter = {name: {} for name in active_names}
         if data.get("status") == "success":
@@ -953,6 +1071,30 @@ async def get_7day_history():
                     ts, wh = int(v[0]), float(v[1])
                     day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
                     per_inverter[name][day_key] = max(per_inverter[name].get(day_key, 0.0), wh)
+
+        # Fallback to total_energy max-min per day if daily_energy was 0
+        if t_data.get("status") == "success":
+            for result in t_data.get("data", {}).get("result", []):
+                raw_name = (result.get("metric") or {}).get("inverter", "")
+                name = resolve_inverter_name(raw_name, active_names)
+                if not name:
+                    continue
+                if name not in per_inverter:
+                    per_inverter[name] = {}
+
+                totals_by_day = {}
+                for v in result.get("values", []):
+                    ts, wh = int(v[0]), float(v[1])
+                    day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    if day_key not in totals_by_day:
+                        totals_by_day[day_key] = []
+                    totals_by_day[day_key].append(wh)
+
+                for day_key, vals in totals_by_day.items():
+                    if per_inverter[name].get(day_key, 0.0) == 0.0 and len(vals) >= 2:
+                        diff = max(vals) - min(vals)
+                        if diff > 0:
+                            per_inverter[name][day_key] = diff
 
         labels = [d["date"] for d in days_list]
         series_out = []
