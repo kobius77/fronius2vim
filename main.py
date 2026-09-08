@@ -983,8 +983,27 @@ async def get_today():
             p_res.raise_for_status()
             e_data, t_data, p_data = e_res.json(), t_res.json(), p_res.json()
 
+        # Compute 15-minute energy deltas (kWh) for each inverter.
+        # total_energy is continuous across midnight and available on all inverters.
         e_series = {name: {} for name in active_names}
-        # 1. Process daily_energy metrics
+
+        # 1. Primary: 15-minute deltas from total_energy
+        if t_data.get("status") == "success":
+            for result in t_data.get("data", {}).get("result", []):
+                raw_name = (result.get("metric") or {}).get("inverter", "")
+                name = resolve_inverter_name(raw_name, active_names)
+                if not name:
+                    continue
+                if name not in e_series:
+                    e_series[name] = {}
+                values = result.get("values", [])
+                for i in range(1, len(values)):
+                    ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
+                    kwh = (curr - prev) / 1000.0
+                    if 0 <= kwh < 50:
+                        e_series[name][ts] = kwh
+
+        # 2. Daily_energy deltas fallback (if any total_energy interval was missing)
         if e_data.get("status") == "success":
             for result in e_data.get("data", {}).get("result", []):
                 raw_name = (result.get("metric") or {}).get("inverter", "")
@@ -996,26 +1015,9 @@ async def get_today():
                 values = result.get("values", [])
                 for i in range(1, len(values)):
                     ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
-                    kwh = (curr - prev) / 1000
-                    if kwh >= 0:
+                    kwh = (curr - prev) / 1000.0
+                    if 0 <= kwh < 50:
                         e_series[name][ts] = max(e_series[name].get(ts, 0.0), kwh)
-
-        # 2. Fallback: for inverters where daily_energy had no non-zero deltas, derive from total_energy
-        if t_data.get("status") == "success":
-            for result in t_data.get("data", {}).get("result", []):
-                raw_name = (result.get("metric") or {}).get("inverter", "")
-                name = resolve_inverter_name(raw_name, active_names)
-                if not name:
-                    continue
-                if name not in e_series or sum(e_series[name].values()) == 0.0:
-                    if name not in e_series:
-                        e_series[name] = {}
-                    values = result.get("values", [])
-                    for i in range(1, len(values)):
-                        ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
-                        kwh = (curr - prev) / 1000
-                        if 0 <= kwh < 100:
-                            e_series[name][ts] = max(e_series[name].get(ts, 0.0), kwh)
 
         p_series = {name: {} for name in active_names}
         if p_data.get("status") == "success":
@@ -1048,6 +1050,9 @@ async def get_today():
                 if datetime.fromtimestamp(ts).minute == 0:
                     hourly[ts - 1800] = round(cur, 2)
                     cur = 0.0
+            if cur > 0 and all_ts:
+                hourly[all_ts[-1]] = round(cur, 2)
+
             series_out.append({
                 "name": name,
                 "energy_kwh": [hourly.get(ts) for ts in all_ts],
@@ -1100,7 +1105,7 @@ async def get_7day_history():
                     day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
                     per_inverter[name][day_key] = max(per_inverter[name].get(day_key, 0.0), wh)
 
-        # Fallback to total_energy max-min per day if daily_energy was 0
+        # Merge total_energy max-min per day
         if t_data.get("status") == "success":
             for result in t_data.get("data", {}).get("result", []):
                 raw_name = (result.get("metric") or {}).get("inverter", "")
@@ -1119,10 +1124,10 @@ async def get_7day_history():
                     totals_by_day[day_key].append(wh)
 
                 for day_key, vals in totals_by_day.items():
-                    if per_inverter[name].get(day_key, 0.0) == 0.0 and len(vals) >= 2:
+                    if len(vals) >= 2:
                         diff = max(vals) - min(vals)
                         if diff > 0:
-                            per_inverter[name][day_key] = diff
+                            per_inverter[name][day_key] = max(per_inverter[name].get(day_key, 0.0), diff)
 
         labels = [d["date"] for d in days_list]
         series_out = []
