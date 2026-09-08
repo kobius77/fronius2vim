@@ -688,6 +688,7 @@ HTML_DASHBOARD = """
         </div>
         <div class="chart-card">
             <div class="chart-header"><div class="chart-title">Last 7 Days Production</div></div>
+            <div class="legend" id="sevenDayLegend"></div>
             <canvas id="sevenDayChart"></canvas>
         </div>
         <div class="chart-card">
@@ -733,7 +734,8 @@ HTML_DASHBOARD = """
             }
         });
         const PALETTE=['#0fde41','#faf000','#0ea5e9','#f97316','#a855f7','#ef4444','#14b8a6','#84cc16'];
-        async function fetchCombinedData(){try{const r=await fetch('/api/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (power)',data:s.power_kw,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
+        const GREEN=['#166534','#15803d','#16a34a','#22c55e','#4ade80','#84cc16','#65a30d','#86efac'];
+        async function fetchCombinedData(){try{const r=await fetch('/api/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (power)',data:s.power_kw,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>Power: ${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchCombinedData();setInterval(fetchCombinedData,300000);
 
         const sCtx = document.getElementById('sevenDayChart').getContext('2d');
@@ -741,7 +743,7 @@ HTML_DASHBOARD = """
             type:'bar',data:{labels:[],datasets:[]},
             options:{responsive:true,maintainAspectRatio:true,scales:{y:{beginAtZero:true,stacked:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#93949e',font:{size:11}}},x:{type:'category',stacked:true,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}}},plugins:{legend:{display:false}}}
         });
-        async function fetchSevenDay(){try{const r=await fetch('/api/history/7days');const d=await r.json();if(d.days&&d.days.length&&d.series&&d.series.length){sevenDayChart.data.labels=d.days;sevenDayChart.data.datasets=d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return {label:s.name,data:s.kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:4,stack:'energy'}});sevenDayChart.update()}}catch(e){}}
+        async function fetchSevenDay(){try{const r=await fetch('/api/history/7days');const d=await r.json();if(d.days&&d.days.length&&d.series&&d.series.length){sevenDayChart.data.labels=d.days;sevenDayChart.data.datasets=d.series.map((s,i)=>{const c=GREEN[i%GREEN.length];return {label:s.name,data:s.kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:4,stack:'energy'}});sevenDayChart.update();document.getElementById('sevenDayLegend').innerHTML=d.series.map((s,i)=>{const c=GREEN[i%GREEN.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchSevenDay();setInterval(fetchSevenDay,3600000);
 
         let ws;
