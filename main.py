@@ -1247,9 +1247,7 @@ HTML_SUBMETERING = """
         .status-dot.disabled{background:var(--muted);opacity:.5}
         .container{max-width:900px;margin:0 auto;padding:24px}
         .inv-card{background:var(--card);border-radius:16px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;align-items:center}
-        #deviceCards,#consumerCards{display:grid;gap:16px;margin-bottom:24px}
-        #deviceCards:has(.inv-card:nth-child(2)),#consumerCards:has(.inv-card:nth-child(2)){grid-template-columns:repeat(2,1fr)}
-        @media(max-width:640px){#deviceCards:has(.inv-card:nth-child(2)),#consumerCards:has(.inv-card:nth-child(2)){grid-template-columns:1fr}}
+        #deviceCards,#consumerCards{display:flex;flex-direction:column;gap:16px;margin-bottom:24px}
         .inv-name{font-weight:600;font-size:1rem}
         .inv-status{display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted)}
         .inv-metrics{display:flex;gap:28px}
@@ -1270,7 +1268,10 @@ HTML_SUBMETERING = """
         .pause-btn{background:none;border:none;outline:none;cursor:pointer;font-size:2rem;line-height:1;color:var(--text);display:flex;align-items:center;justify-content:center;width:2.4rem;height:2.4rem;padding:0;transition:color .15s}
         .pause-btn:hover{color:#000}
         .pause-pause{font-size:1.7rem;letter-spacing:-.08em;font-weight:800}
-        .consumer-dev{font-size:.7rem;color:var(--muted);margin-top:2px}
+        .consumer-dev{font-size:.8rem;color:var(--muted);margin-top:2px}
+        .dev-dot{position:absolute;top:16px;right:18px;width:10px;height:10px;border-radius:50%;background:#ef4444}
+        .dev-dot.connected{background:var(--green)}
+        .last-seen{font-size:.75rem;color:var(--muted);margin-left:10px;font-weight:400}
         .consumer-edit{background:none;border:none;cursor:pointer;color:var(--muted);font-size:.7rem;padding:0 2px;line-height:1}
         .consumer-edit:hover{color:var(--text)}
         .modal-back{position:fixed;inset:0;background:rgba(20,20,30,.35);display:none;align-items:center;justify-content:center;z-index:50}
@@ -1382,7 +1383,7 @@ HTML_SUBMETERING = """
             const u=dev.voltage!=null?dev.voltage.toFixed(0):'--';
             const a=dev.current!=null?dev.current.toFixed(2):'--';
             const showName=dev.name;
-            return `<div class="inv-card${dev.paused?' paused':''}"><div class="inv-left"><button class="pause-btn" data-name="${dev.name}" title="${dev.paused?'Resume logging to VictoriaMetrics':'Pause logging to VictoriaMetrics'}"><span class="pause-pause">${dev.paused?'\u25B6':'\u275A\u275A'}</span></button><div style="min-width:0"><div class="inv-name">${showName}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span class="status-dot ${dev.paused?'disabled':'connected'}" style="margin-left:12px"></span>${dev.paused?'Paused':'Logging'}<span style="color:var(--muted);margin-left:12px">seen ${dev.last_seen||'--'}</span></div><div class="consumer-dev">${dev.consumer?`${dev.consumer} <button class="consumer-edit" data-name="${dev.name}" title="Edit consumer name">\u270E</button>`:`<button class="consumer-edit" data-name="${dev.name}" title="Add consumer name">+ add consumer</button>`}</div></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Counter</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
+            return `<div class="inv-card dev-card${dev.paused?' paused':''}"><span class="dev-dot ${on?'connected':''}"></span><div class="inv-left"><button class="pause-btn" data-name="${dev.name}" title="${dev.paused?'Resume logging to VictoriaMetrics':'Pause logging to VictoriaMetrics'}"><span class="pause-pause">${dev.paused?'\u25B6':'\u275A\u275A'}</span></button><div style="min-width:0"><div class="inv-name">${showName}<span class="last-seen">seen ${dev.last_seen||'--'}</span></div><div class="consumer-dev">${dev.consumer?`${dev.consumer} <button class="consumer-edit" data-name="${dev.name}" title="Edit consumer name">\u270E</button>`:`<button class="consumer-edit" data-name="${dev.name}" title="Add consumer name">+ add consumer</button>`}</div></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Counter</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
         function renderConsumers(consumers){const sec=document.getElementById('consumerSection');const c=document.getElementById('consumerCards');if(!consumers||!consumers.length){sec.style.display='none';return}sec.style.display='block';c.innerHTML=consumers.map(cs=>{const mp=cs.max_power_w!=null?cs.max_power_w.toFixed(0):'--';const ck=cs.cycle_kwh!=null?cs.cycle_kwh.toFixed(2):'--';const ex=cs.expected_kwh_24h!=null?cs.expected_kwh_24h.toFixed(2):'--';
             return `<div class="inv-card"><div><div class="inv-name">${cs.consumer}</div><div class="inv-status"><span class="status-dot ${cs.online&&!cs.paused?'connected':'disabled'}"></span>${cs.paused?'Paused':(cs.online?'Logging':'Offline')}<span style="color:var(--muted);margin-left:12px">since ${cs.cycle_started||'--'} (${cs.cycles_hours!=null?cs.cycles_hours.toFixed(1):'--'} h)</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${mp}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Max draw</div></div><div><div class="inv-metric-val">${ck}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Cycle</div></div><div><div class="inv-metric-val">${ex}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Exp. 24h</div></div></div></div>`}).join('')}
         document.getElementById('deviceCards').addEventListener('click',(ev)=>{const b=ev.target.closest('.pause-btn');if(b){togglePause(b.dataset.name,ev);return}const ed=ev.target.closest('.consumer-edit');if(ed){openConsumerModal(ed.dataset.name)}});
@@ -1967,7 +1968,7 @@ async def submetering_today():
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
 
         energy_params = {"query": "zigbee_energy_kilowatthours", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
-        power_params = {"query": "avg_over_time(zigbee_power_watts[15m])", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
+        power_params = {"query": "zigbee_power_watts", "start": start_ts, "end": int(now_utc.timestamp()), "step": "30s"}
 
         async with httpx.AsyncClient() as client:
             e_res, p_res = await asyncio.gather(
