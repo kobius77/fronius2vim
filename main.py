@@ -1191,8 +1191,8 @@ HTML_SUBMETERING = """
         .pause-btn{background:none;border:none;outline:none;cursor:pointer;font-size:2rem;line-height:1;color:var(--text);display:flex;align-items:center;justify-content:center;width:2.4rem;height:2.4rem;padding:0;transition:color .15s}
         .pause-btn:hover{color:#000}
         .pause-pause{font-size:1.7rem;letter-spacing:-.08em;font-weight:800}
-        .consumer-dev{font-size:.7rem;color:var(--muted)}
-        .consumer-edit{background:none;border:none;cursor:pointer;color:var(--muted);font-size:.85rem;padding:0 2px;line-height:1}
+        .consumer-dev{font-size:.7rem;color:var(--muted);margin-top:2px}
+        .consumer-edit{background:none;border:none;cursor:pointer;color:var(--muted);font-size:.7rem;padding:0 2px;line-height:1}
         .consumer-edit:hover{color:var(--text)}
         .modal-back{position:fixed;inset:0;background:rgba(20,20,30,.35);display:none;align-items:center;justify-content:center;z-index:50}
         .modal-back.open{display:flex}
@@ -1302,11 +1302,10 @@ HTML_SUBMETERING = """
             const e=dev.energy!=null?dev.energy.toFixed(2):'--';
             const u=dev.voltage!=null?dev.voltage.toFixed(0):'--';
             const a=dev.current!=null?dev.current.toFixed(2):'--';
-            const showName=dev.consumer||dev.name;
-            const editBtn=`<button class="consumer-edit" data-name="${dev.name}" title="Edit consumer name">${dev.consumer?'\u270E':'+ consumer'}</button>`;
-            return `<div class="inv-card${dev.paused?' paused':''}"><div class="inv-left"><button class="pause-btn" data-name="${dev.name}" title="${dev.paused?'Resume logging to VictoriaMetrics':'Pause logging to VictoriaMetrics'}"><span class="pause-pause">${dev.paused?'\u25B6':'\u275A\u275A'}</span></button><div style="min-width:0"><div class="inv-name">${showName}</div>${dev.consumer?`<div class="consumer-dev">${dev.name}</div>`:''}${dev.consumer?'':`<div class="consumer-dev">meter</div>`}<div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span class="status-dot ${dev.paused?'disabled':'connected'}" style="margin-left:12px"></span>${dev.paused?'Paused':'Logging'}<span style="color:var(--muted);margin-left:12px">seen ${dev.last_seen||'--'}</span></div></div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">${editBtn}<div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Counter</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
+            const showName=dev.name;
+            return `<div class="inv-card${dev.paused?' paused':''}"><div class="inv-left"><button class="pause-btn" data-name="${dev.name}" title="${dev.paused?'Resume logging to VictoriaMetrics':'Pause logging to VictoriaMetrics'}"><span class="pause-pause">${dev.paused?'\u25B6':'\u275A\u275A'}</span></button><div style="min-width:0"><div class="inv-name">${showName}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span class="status-dot ${dev.paused?'disabled':'connected'}" style="margin-left:12px"></span>${dev.paused?'Paused':'Logging'}<span style="color:var(--muted);margin-left:12px">seen ${dev.last_seen||'--'}</span></div><div class="consumer-dev">${dev.consumer?`${dev.consumer} <button class="consumer-edit" data-name="${dev.name}" title="Edit consumer name">\u270E</button>`:`<button class="consumer-edit" data-name="${dev.name}" title="Add consumer name">+ add consumer</button>`}</div></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Counter</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
         function renderConsumers(consumers){const sec=document.getElementById('consumerSection');const c=document.getElementById('consumerCards');if(!consumers||!consumers.length){sec.style.display='none';return}sec.style.display='block';c.innerHTML=consumers.map(cs=>{const mp=cs.max_power_w!=null?cs.max_power_w.toFixed(0):'--';const ck=cs.cycle_kwh!=null?cs.cycle_kwh.toFixed(2):'--';const ex=cs.expected_kwh_24h!=null?cs.expected_kwh_24h.toFixed(2):'--';
-            return `<div class="inv-card"><div><div class="inv-name">${cs.consumer}</div><div class="inv-status"><span class="status-dot ${cs.online&&!cs.paused?'connected':'disabled'}"></span>${cs.paused?'Paused':(cs.online?'Logging':'Offline')}<span style="color:var(--muted);margin-left:12px">${cs.device}</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${mp}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Max draw</div></div><div><div class="inv-metric-val">${ck}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Cycle</div></div><div><div class="inv-metric-val">${ex}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Exp. 24h</div></div></div></div>`}).join('')}
+            return `<div class="inv-card"><div><div class="inv-name">${cs.consumer}</div><div class="inv-status"><span class="status-dot ${cs.online&&!cs.paused?'connected':'disabled'}"></span>${cs.paused?'Paused':(cs.online?'Logging':'Offline')}<span style="color:var(--muted);margin-left:12px">since ${cs.cycle_started||'--'} (${cs.cycles_hours!=null?cs.cycles_hours.toFixed(1):'--'} h)</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${mp}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Max draw</div></div><div><div class="inv-metric-val">${ck}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Cycle</div></div><div><div class="inv-metric-val">${ex}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Exp. 24h</div></div></div></div>`}).join('')}
         document.getElementById('deviceCards').addEventListener('click',(ev)=>{const b=ev.target.closest('.pause-btn');if(b){togglePause(b.dataset.name,ev);return}const ed=ev.target.closest('.consumer-edit');if(ed){openConsumerModal(ed.dataset.name)}});
         function openConsumerModal(name){const d=zigDevCache.find(x=>x.name===name);document.getElementById('cmDevice').textContent=name;document.getElementById('cmInput').value=(d&&d.consumer)||'';document.getElementById('cmInput').dataset.name=name;document.getElementById('consumerModal').classList.add('open');document.getElementById('cmInput').focus()}
         function closeConsumerModal(){document.getElementById('consumerModal').classList.remove('open')}
@@ -1733,7 +1732,7 @@ async def submetering_set_consumer(name: str, payload: Dict[str, Any] = Body(...
 def consumers_snapshot() -> List[Dict[str, Any]]:
     now = datetime.now(LOCAL_TZ)
     now_ts = now.timestamp()
-    out: List[Dict[str, Any]] = []
+    groups: Dict[str, Dict[str, Any]] = {}
     with zigbee_lock:
         for device, meta in zigbee_meta.items():
             consumer = meta.get("consumer")
@@ -1745,30 +1744,54 @@ def consumers_snapshot() -> List[Dict[str, Any]]:
                 online = last is not None and (now - last).total_seconds() <= ZIGBEE_ONLINE_GRACE
             except TypeError:
                 online = False
-            cycle_kwh = expected_kwh = None
+            paused = bool(meta.get("paused"))
             started_ts = meta.get("cycle_start_ts")
             start_energy = meta.get("cycle_energy_start")
             energy = s.get("energy")
-            hours = None
-            if started_ts is not None:
-                hours = max(0.0, (now_ts - started_ts) / 3600.0)
-                if energy is not None and start_energy is not None:
-                    cycle_kwh = max(0.0, round(energy - start_energy, 3))
-                    if hours >= 0.25:
-                        expected_kwh = round(cycle_kwh / hours * 24.0, 2)
-            max_power = meta.get("cycle_max_power")
-            out.append({
-                "consumer": consumer,
-                "device": device,
-                "power_w": s.get("power"),
-                "online": online,
-                "paused": bool(meta.get("paused")),
-                "max_power_w": round(max_power, 1) if max_power is not None else None,
-                "cycle_kwh": cycle_kwh,
-                "expected_kwh_24h": expected_kwh,
-                "cycle_started": datetime.fromtimestamp(started_ts, LOCAL_TZ).strftime("%H:%M") if started_ts else None,
-                "cycles_hours": round(hours, 2) if hours is not None else None,
+            cycle_kwh = expected = None
+            if started_ts is not None and energy is not None and start_energy is not None:
+                cycle_kwh = max(0.0, round(energy - start_energy, 3))
+                hours = (now_ts - started_ts) / 3600.0
+                if hours >= 0.25:
+                    expected = round(cycle_kwh / hours * 24.0, 2)
+            g = groups.setdefault(consumer, {
+                "consumer": consumer, "online": False, "paused": True,
+                "power_w": 0.0, "has_power": False, "max_power_w": None,
+                "cycle_kwh": 0.0, "has_cycle": False, "expected_kwh_24h": 0.0,
+                "has_expected": False, "cycle_started_ts": None,
             })
+            g["online"] = g["online"] or online
+            g["paused"] = g["paused"] and paused
+            pw = s.get("power")
+            if pw is not None:
+                g["power_w"] += pw
+                g["has_power"] = True
+            mp = meta.get("cycle_max_power")
+            if mp is not None and (g["max_power_w"] is None or mp > g["max_power_w"]):
+                g["max_power_w"] = mp
+            if cycle_kwh is not None:
+                g["cycle_kwh"] += cycle_kwh
+                g["has_cycle"] = True
+            if expected is not None:
+                g["expected_kwh_24h"] += expected
+                g["has_expected"] = True
+            if started_ts is not None and (g["cycle_started_ts"] is None or started_ts < g["cycle_started_ts"]):
+                g["cycle_started_ts"] = started_ts
+    out = []
+    for g in groups.values():
+        started_ts = g["cycle_started_ts"]
+        hours = (now_ts - started_ts) / 3600.0 if started_ts else None
+        out.append({
+            "consumer": g["consumer"],
+            "power_w": round(g["power_w"], 1) if g["has_power"] else None,
+            "online": g["online"],
+            "paused": g["paused"],
+            "max_power_w": round(g["max_power_w"], 1) if g["max_power_w"] is not None else None,
+            "cycle_kwh": round(g["cycle_kwh"], 3) if g["has_cycle"] else None,
+            "expected_kwh_24h": round(g["expected_kwh_24h"], 2) if g["has_expected"] else None,
+            "cycle_started": datetime.fromtimestamp(started_ts, LOCAL_TZ).strftime("%H:%M") if started_ts else None,
+            "cycles_hours": round(hours, 2) if hours is not None else None,
+        })
     out.sort(key=lambda d: d["consumer"])
     return out
 
