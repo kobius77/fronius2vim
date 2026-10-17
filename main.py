@@ -14,7 +14,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -63,6 +63,9 @@ INVERTERS_FILE = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "inverters.json"),
 ).strip().strip("\"'")
 INVERTERS_BACKUP = INVERTERS_FILE + ".bak"
+
+# Zigbee per-device logging pause (survives restarts)
+ZIGBEE_PAUSE_FILE = os.path.join(os.path.dirname(INVERTERS_FILE), "zigbee_paused.json")
 
 # Serializes read-modify-write of the inverter config (prevents races / lost updates)
 config_lock = asyncio.Lock()
@@ -523,7 +526,9 @@ class ZigbeeMqttSubscriber:
 
         with zigbee_lock:
             zigbee_data[device] = sample
-        self._schedule_metric_writes(device, sample)
+            is_paused = device in zigbee_paused
+        if not is_paused:
+            self._schedule_metric_writes(device, sample)
 
     def _schedule_metric_writes(self, device: str, sample: Dict[str, Any]):
         loop = main_loop
@@ -579,6 +584,7 @@ midnight_baselines: Dict[str, Dict[str, Any]] = {}
 zigbee_data: Dict[str, Dict[str, Any]] = {}
 zigbee_lock = threading.Lock()
 zigbee_daily_baselines: Dict[str, Dict[str, Any]] = {}
+zigbee_paused: Set[str] = set()
 main_loop: Optional[asyncio.AbstractEventLoop] = None
 writer: Optional[VictoriaMetricsWriter] = None
 zigbee_subscriber: Optional[ZigbeeMqttSubscriber] = None
@@ -658,6 +664,30 @@ async def calculate_daily_energy(name: str, day_energy: float, total_energy: flo
     return 0.0
 
 
+def load_zigbee_paused() -> None:
+    global zigbee_paused
+    try:
+        if os.path.isfile(ZIGBEE_PAUSE_FILE):
+            with open(ZIGBEE_PAUSE_FILE, "r") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                zigbee_paused = {str(n) for n in data}
+                if zigbee_paused:
+                    logger.info(f"Loaded {len(zigbee_paused)} paused Zigbee devices from {ZIGBEE_PAUSE_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to load Zigbee pause file: {e}")
+
+
+def save_zigbee_paused() -> None:
+    try:
+        tmp = ZIGBEE_PAUSE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(sorted(zigbee_paused), f)
+        os.replace(tmp, ZIGBEE_PAUSE_FILE)
+    except Exception as e:
+        logger.error(f"Failed to save Zigbee pause file: {e}")
+
+
 def zigbee_devices_snapshot() -> List[Dict[str, Any]]:
     now = datetime.now(LOCAL_TZ)
     with zigbee_lock:
@@ -671,11 +701,13 @@ def zigbee_devices_snapshot() -> List[Dict[str, Any]]:
             items.append({
                 "name": name,
                 "power": s.get("power"),
+                "energy": s.get("energy"),
                 "current": s.get("current"),
                 "voltage": s.get("voltage"),
                 "state": s.get("state"),
                 "last_seen": last.strftime("%H:%M:%S"),
                 "online": online,
+                "paused": name in zigbee_paused,
             })
     items.sort(key=lambda d: d["name"])
     return items
@@ -1108,6 +1140,11 @@ HTML_SUBMETERING = """
         .legend-item{display:flex;align-items:center;gap:6px;font-size:.75rem;color:var(--muted)}
         .legend-color{width:12px;height:12px;border-radius:2px}
         .footer{text-align:center;padding:24px;color:var(--muted);font-size:.75rem}
+        .inv-card{position:relative}
+        .inv-card.paused{opacity:.55}
+        .inv-card.paused .inv-name:after{content:' (paused)';color:#b91c1c;font-weight:500}
+        .pause-btn{position:absolute;top:12px;right:14px;width:30px;height:30px;border:1px solid var(--border,#e5e7eb);border-radius:8px;background:transparent;cursor:pointer;font-size:.9rem;line-height:1;color:var(--muted);transition:all .15s}
+        .pause-btn:hover{background:#f3f4f6;color:#111}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -1185,13 +1222,15 @@ HTML_SUBMETERING = """
         async function fetchSevenDay(){try{const r=await fetch('/api/submetering/history/7days');const d=await r.json();if(d.days&&d.days.length&&d.series&&d.series.length){sevenDayChart.data.labels=d.days;sevenDayChart.data.datasets=d.series.map((s,i)=>{const c=GREEN[i%GREEN.length];return {label:s.name,data:s.kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:4,stack:'energy'}});sevenDayChart.update();document.getElementById('sevenDayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Energy:</span>'+d.series.map((s,i)=>{const c=GREEN[i%GREEN.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchSevenDay();setInterval(fetchSevenDay,3600000);
 
-        let ws;
-        function renderCards(devices){const c=document.getElementById('deviceCards');c.innerHTML=devices.map(dev=>{const on=dev.online;
+        let ws;let zigDevCache=[];
+        function togglePause(name,ev){ev.stopPropagation();const d=zigDevCache.find(x=>x.name===name);if(d){d.paused=!d.paused;renderCards(zigDevCache)}fetch('/api/submetering/device/'+encodeURIComponent(name)+'/pause',{method:'POST'}).then(r=>r.json()).catch(()=>{})}
+        function renderCards(devices){zigDevCache=devices;const c=document.getElementById('deviceCards');c.innerHTML=devices.map(dev=>{const on=dev.online;
             const p=dev.power!=null?dev.power.toFixed(1):'--';
-            const e=(dev.daily_kwh!=null?dev.daily_kwh:0).toFixed(2);
+            const e=dev.energy!=null?dev.energy.toFixed(2):'--';
             const u=dev.voltage!=null?dev.voltage.toFixed(0):'--';
             const a=dev.current!=null?dev.current.toFixed(2):'--';
-            return `<div class="inv-card"><div><div class="inv-name">${dev.name}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span style="color:var(--muted);margin-left:8px">seen ${dev.last_seen||'--'}</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Today</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
+            return `<div class="inv-card${dev.paused?' paused':''}"><button class="pause-btn" data-name="${dev.name}" title="${dev.paused?'Resume logging to VictoriaMetrics':'Pause logging to VictoriaMetrics'}">${dev.paused?'\u25B6':'\u23F8'}</button><div><div class="inv-name">${dev.name}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span style="color:var(--muted);margin-left:8px">seen ${dev.last_seen||'--'}</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Counter</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
+        document.getElementById('deviceCards').addEventListener('click',(ev)=>{const b=ev.target.closest('.pause-btn');if(b)togglePause(b.dataset.name,ev)});
 
         function connect(){
             ws=new WebSocket(`ws://${window.location.host}/ws`);
@@ -1537,6 +1576,19 @@ async def submetering_data():
     return {"devices": out, "subscriber_status": status}
 
 
+@app.post("/api/submetering/device/{name}/pause")
+async def submetering_toggle_pause(name: str):
+    with zigbee_lock:
+        if name in zigbee_paused:
+            zigbee_paused.discard(name)
+        else:
+            zigbee_paused.add(name)
+        currently_paused = name in zigbee_paused
+    save_zigbee_paused()
+    logger.info(f"Zigbee device '{name}' {'paused' if currently_paused else 'resumed'}")
+    return {"name": name, "paused": currently_paused}
+
+
 @app.get("/api/submetering/today")
 async def submetering_today():
     try:
@@ -1714,6 +1766,7 @@ async def startup_event():
     main_loop = asyncio.get_running_loop()
     writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
     configs = load_inverters()
+    load_zigbee_paused()
 
     logger.info("Starting fronius2vim")
     logger.info(f"Inverter config file: {INVERTERS_FILE}")
