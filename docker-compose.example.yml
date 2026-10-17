@@ -25,6 +25,13 @@ services:
       # - MQTT_CLIENT_ID=fronius2vim
       # - MQTT_RETAIN=true
       # - MQTT_QOS=0
+      # Zigbee subscription (optional — enables the submetering dashboard)
+      # - ZIGBEE_MQTT_HOST=172.20.204.23
+      # - ZIGBEE_MQTT_PORT=1883
+      # - ZIGBEE_MQTT_USERNAME=mqtt2vim
+      # - ZIGBEE_MQTT_PASSWORD=your-zigbee-mqtt-password
+      # - ZIGBEE_MQTT_BASE=zigbee2mqtt
+      # - ZIGBEE_ONLINE_GRACE=300
     networks:
       - fronius2vim-net
     labels:

@@ -2,9 +2,13 @@
 
 A Python-based tool that polls real-time metrics and energy counters from a Fronius PV inverter and forwards them to VictoriaMetrics and an MQTT broker, complete with a live web dashboard.
 
+Also included is a **Submetering** dashboard: it consumes Zigbee smart-plug metrics (via Zigbee2MQTT on MQTT), writes them to VictoriaMetrics, and visualizes them in the same style — switchable via the nav links in the title bar.
+
 ## Features
 
 - **Dual-rate collection**: Real-time power metrics every 10 seconds (configurable), energy counters every 15 minutes.
+- **Zigbee Submetering**: Subscribes to Zigbee2MQTT device events (`ZIGBEE_MQTT_BASE`, e.g. `zigbee2mqtt/#`), forwards power (W), total energy (kWh), voltage (V) and current (A) per device to VictoriaMetrics.
+- **Multi-Dashboard frontend**: `FRONIUS2VIM` (`/`) and `SUBMETERING` (`/submetering`) share the same visual style and title-bar navigation.
 - **MQTT Publishing**: Automatically publishes live AC power output in Watts (`W`) as a plain numeric string (e.g. `2500.0`, `0.0` at night/standby) with configurable retain flag and QoS.
 - **VictoriaMetrics Integration**: Native Prometheus line protocol export for power and daily/yearly/total energy metrics.
 - **Web Dashboard**: Modern, responsive dark-themed dashboard with live WebSocket updates, today's generation vs. power chart, 7-day historical summary, and real-time VictoriaMetrics & MQTT connection indicators.
@@ -45,6 +49,12 @@ A Python-based tool that polls real-time metrics and energy counters from a Fron
 - `fronius_daily_energy_watthours` - Current day energy production (Wh, polled every `ENERGY_INTERVAL`)
 - `fronius_yearly_energy_watthours` - Current year energy production (Wh, polled every `ENERGY_INTERVAL`)
 - `fronius_total_energy_watthours` - Total lifetime energy production (Wh, polled every `ENERGY_INTERVAL`)
+
+### 3. VictoriaMetrics (Zigbee Submetering)
+- `zigbee_power_watts{device=...}` - Current device power (Watts, on every Zigbee2MQTT report)
+- `zigbee_energy_kilowatthours{device=...}` - Total lifetime device energy (kWh, continuous counter; daily kWh derived from deltas)
+- `zigbee_voltage_volts{device=...}` - Device mains voltage (V)
+- `zigbee_current_amperes{device=...}` - Device current (A)
 
 ---
 
@@ -101,12 +111,19 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 | `MQTT_CLIENT_ID` | `fronius2vim` | MQTT client identifier |
 | `MQTT_RETAIN` | `true` | Retain flag for published MQTT messages (`true`/`false`) |
 | `MQTT_QOS` | `0` | MQTT QoS level (0, 1, or 2) |
+| `ZIGBEE_MQTT_HOST` | _(empty/disabled)_ | MQTT broker hosting Zigbee2MQTT (enables submetering when set) |
+| `ZIGBEE_MQTT_PORT` | `1883` | Zigbee MQTT broker port |
+| `ZIGBEE_MQTT_USERNAME` | _(empty)_ | Zigbee MQTT username (optional) |
+| `ZIGBEE_MQTT_PASSWORD` | _(empty)_ | Zigbee MQTT password (optional) |
+| `ZIGBEE_MQTT_BASE` | `zigbee2mqtt` | Base topic to subscribe to (`{base}/#`, bridge topics ignored) |
+| `ZIGBEE_ONLINE_GRACE` | `300` | Seconds without a report before a device is marked offline |
 
 ---
 
 ## API Endpoints
 
 - `GET /` - Web dashboard
+- `GET /submetering` - Submetering dashboard (Zigbee devices)
 - `GET /admin` - Inverter management panel (add/remove inverters, MQTT toggles)
 - `GET /api/data` - Current metrics for all inverters (JSON)
 - `GET /api/inverters` - List configured inverters with status
@@ -115,8 +132,11 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 - `DELETE /api/inverters/{name}` - Remove an inverter
 - `GET /api/today` - 24-hour combined hourly energy and 15m power history (from VictoriaMetrics)
 - `GET /api/history/7days` - 7-day daily energy generation history (from VictoriaMetrics)
+- `GET /api/submetering/data` - Current status of all Zigbee devices (JSON)
+- `GET /api/submetering/today` - 24-hour combined hourly energy and 15m power history for Zigbee devices (from VictoriaMetrics)
+- `GET /api/submetering/history/7days` - 7-day daily energy consumption history for Zigbee devices (from VictoriaMetrics)
 - `GET /api/metrics-log` - Last 50 metric writes to VictoriaMetrics
-- `WS /ws` - WebSocket for real-time live dashboard updates
+- `WS /ws` - WebSocket for real-time live dashboard updates (also broadcasts Zigbee device status)
 
 ---
 

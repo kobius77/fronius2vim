@@ -8,4 +8,4 @@ fronius2vim-data/
 __pycache__/
 *.pyc
 .venv/
-venv/
+venv/docker-compose.yml

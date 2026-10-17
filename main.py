@@ -47,6 +47,13 @@ MQTT_QOS = int(os.getenv("MQTT_QOS", "0").strip().strip("\"'"))
 FRONIUS_HOST = os.getenv("FRONIUS_HOST", "172.20.203.100")
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "froniusalt/power").strip().strip("\"'")
 
+ZIGBEE_MQTT_HOST = os.getenv("ZIGBEE_MQTT_HOST", "").strip().strip("\"'")
+ZIGBEE_MQTT_PORT = int(os.getenv("ZIGBEE_MQTT_PORT", "1883").strip().strip("\"'"))
+ZIGBEE_MQTT_USERNAME = os.getenv("ZIGBEE_MQTT_USERNAME", "").strip().strip("\"'")
+ZIGBEE_MQTT_PASSWORD = os.getenv("ZIGBEE_MQTT_PASSWORD", "").strip().strip("\"'")
+ZIGBEE_MQTT_BASE = os.getenv("ZIGBEE_MQTT_BASE", "zigbee2mqtt").strip().strip("\"'")
+ZIGBEE_ONLINE_GRACE = int(os.getenv("ZIGBEE_ONLINE_GRACE", "300"))
+
 # Inverters persistence
 # Path is overridable (e.g. mount to a volume). Defaults to next to main.py.
 # Container default via docker-compose.example.yml: /app/data/inverters.json
@@ -441,6 +448,123 @@ class MqttPublisher:
 
 
 # ---------------------------------------------------------------------------
+# Zigbee MQTT subscriber (consumes zigbee2mqtt device states)
+# ---------------------------------------------------------------------------
+class ZigbeeMqttSubscriber:
+    def __init__(self, host: str, port: int, base: str,
+                 username: Optional[str] = None, password: Optional[str] = None):
+        self.host = host.strip().strip("\"'") if host else ""
+        self.port = port
+        self.base = base.strip().strip("\"'") if base else "zigbee2mqtt"
+        self.prefix = f"{self.base}/"
+        self.writer: Optional[VictoriaMetricsWriter] = None
+        self.client: Optional[mqtt.Client] = None
+        self.connected: bool = False
+
+        if not self.host:
+            return
+
+        try:
+            if hasattr(mqtt, "CallbackAPIVersion"):
+                self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="fronius2vim-zigbee")
+            else:
+                self.client = mqtt.Client(client_id="fronius2vim-zigbee")
+
+            if username and password:
+                self.client.username_pw_set(username, password)
+            elif username:
+                self.client.username_pw_set(username)
+
+            self.client.on_connect = self._on_connect
+            self.client.on_disconnect = self._on_disconnect
+            self.client.on_message = self._on_message
+            self.client.reconnect_delay_set(1, 60)
+            self.client.connect(self.host, self.port, keepalive=60)
+            self.client.loop_start()
+            logger.info(f"Zigbee MQTT subscribing to {self.host}:{self.port} base topic '{self.base}'")
+        except Exception as e:
+            logger.error(f"Zigbee MQTT init failed: {e}")
+            self.client = None
+
+    def _on_connect(self, client, userdata, flags, rc, properties=None):
+        rc_code = getattr(rc, "value", rc) if rc is not None else 0
+        self.connected = rc_code == 0
+        if self.connected:
+            client.subscribe(f"{self.prefix}#", qos=0)
+            logger.info(f"Zigbee MQTT connected, subscribed to '{self.prefix}#'")
+        else:
+            logger.warning(f"Zigbee MQTT connect failed rc={rc}")
+
+    def _on_disconnect(self, client, userdata, *args, **kwargs):
+        self.connected = False
+
+    def _on_message(self, client, userdata, m):
+        if not m.topic.startswith(self.prefix):
+            return
+        device = m.topic[len(self.prefix):]
+        if not device or device.startswith("bridge/"):
+            return
+        try:
+            payload = json.loads(m.payload)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+
+        sample: Dict[str, Any] = {"last_seen": datetime.now(LOCAL_TZ)}
+        for key in ("power", "energy", "current", "voltage"):
+            val = payload.get(key)
+            try:
+                sample[key] = float(val)
+            except (TypeError, ValueError):
+                sample[key] = None
+        state = payload.get("state")
+        sample["state"] = state if isinstance(state, (str, bool)) else None
+
+        with zigbee_lock:
+            zigbee_data[device] = sample
+        self._schedule_metric_writes(device, sample)
+
+    def _schedule_metric_writes(self, device: str, sample: Dict[str, Any]):
+        loop = main_loop
+        if loop is None or self.writer is None:
+            return
+
+        async def write():
+            try:
+                if sample.get("power") is not None:
+                    await self.writer.write_metric("zigbee_power_watts", sample["power"], {"device": device})
+                if sample.get("energy") is not None:
+                    await self.writer.write_metric("zigbee_energy_kilowatthours", sample["energy"], {"device": device})
+                if sample.get("current") is not None:
+                    await self.writer.write_metric("zigbee_current_amperes", sample["current"], {"device": device})
+                if sample.get("voltage") is not None:
+                    await self.writer.write_metric("zigbee_voltage_volts", sample["voltage"], {"device": device})
+            except Exception as e:
+                logger.error(f"[zigbee/{device}] metric write error: {e}")
+
+        try:
+            asyncio.run_coroutine_threadsafe(write(), loop)
+        except RuntimeError as e:
+            logger.debug(f"Zigbee metric write scheduling failed: {e}")
+
+    def close(self):
+        if self.client:
+            try:
+                self.connected = False
+                self.client.loop_stop()
+                self.client.disconnect()
+            except Exception:
+                pass
+
+    @property
+    def status(self) -> str:
+        if not self.host:
+            return "disabled"
+        return "connected" if self.connected else "disconnected"
+
+
+# ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
 metrics_log: list = []
@@ -451,6 +575,13 @@ mqtt_publishers: Dict[str, MqttPublisher] = {}
 
 
 midnight_baselines: Dict[str, Dict[str, Any]] = {}
+
+zigbee_data: Dict[str, Dict[str, Any]] = {}
+zigbee_lock = threading.Lock()
+zigbee_daily_baselines: Dict[str, Dict[str, Any]] = {}
+main_loop: Optional[asyncio.AbstractEventLoop] = None
+writer: Optional[VictoriaMetricsWriter] = None
+zigbee_subscriber: Optional[ZigbeeMqttSubscriber] = None
 
 
 async def get_midnight_baseline_total(name: str, writer_url: str) -> Optional[float]:
@@ -525,6 +656,90 @@ async def calculate_daily_energy(name: str, day_energy: float, total_energy: flo
             return 0.0
 
     return 0.0
+
+
+def zigbee_devices_snapshot() -> List[Dict[str, Any]]:
+    now = datetime.now(LOCAL_TZ)
+    with zigbee_lock:
+        items = []
+        for name, s in zigbee_data.items():
+            last = s.get("last_seen", now)
+            try:
+                online = (now - last).total_seconds() <= ZIGBEE_ONLINE_GRACE
+            except TypeError:
+                online = False
+            items.append({
+                "name": name,
+                "power": s.get("power"),
+                "current": s.get("current"),
+                "voltage": s.get("voltage"),
+                "state": s.get("state"),
+                "last_seen": last.strftime("%H:%M:%S"),
+                "online": online,
+            })
+    items.sort(key=lambda d: d["name"])
+    return items
+
+
+async def get_zigbee_day_start_energy(device: str) -> Optional[float]:
+    """Fetch the continuing energy-counter reading at the start of today."""
+    try:
+        now = datetime.now(LOCAL_TZ)
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ts = int(start_of_day.timestamp())
+
+        # Prefer the first recorded point within the first hour of today
+        query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
+        params = {
+            "query": f'zigbee_energy_kilowatthours{{device="{device}"}}',
+            "start": str(start_ts),
+            "end": str(start_ts + 3600),
+            "step": "5m",
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(query_url, params=params)
+        if resp.status_code == 200:
+            results = resp.json().get("data", {}).get("result", [])
+            for result in results:
+                values = result.get("values", [])
+                if values and float(values[0][1]) >= 0:
+                    return float(values[0][1])
+
+        # Fallback: last recorded point shortly before midnight (previous day close)
+        point_params = {
+            "query": f'zigbee_energy_kilowatthours{{device="{device}"}}',
+            "time": str(start_ts - 300),
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{VICTORIAMETRICS_URL}/api/v1/query", params=point_params)
+        if resp.status_code == 200:
+            results = resp.json().get("data", {}).get("result", [])
+            if results:
+                return float(results[0].get("value", [0, None])[1])
+    except Exception as e:
+        logger.debug(f"[zigbee/{device}] day-start energy fetch failed: {e}")
+    return None
+
+
+async def compute_zigbee_daily_kwh(device: str, last_energy: Optional[float]) -> Optional[float]:
+    """Today's kWh for a device, derived from the continuous energy counter."""
+    if last_energy is None:
+        return None
+    day = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+    key = f"{device}|{day}"
+
+    base = zigbee_daily_baselines.get(key)
+    if base is None:
+        val = await get_zigbee_day_start_energy(device)
+        if val is None:
+            # First day we ever see it: treat the current reading as day start
+            val = last_energy
+        zigbee_daily_baselines[key] = {"value": val}
+        for stale in [k for k in zigbee_daily_baselines if k.startswith(f"{device}|") and k != key]:
+            zigbee_daily_baselines.pop(stale, None)
+        base = {"value": val}
+
+    return max(0.0, round(last_energy - base["value"], 3))
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +847,9 @@ HTML_DASHBOARD = """
         body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
         .top-bar{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
         .site-title{font-size:1.125rem;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
+        .site-title a{color:var(--muted);text-decoration:none;font-weight:700}
+        .site-title a.active{color:var(--text)}
+        .site-title a:hover{color:var(--text);opacity:.8}
         .status-group{display:flex;align-items:center;gap:16px}
         .status-badge{display:flex;align-items:center;gap:8px;font-size:.875rem;color:var(--muted)}
         .status-dot{width:8px;height:8px;border-radius:50%;background:#ef4444}
@@ -674,7 +892,7 @@ HTML_DASHBOARD = """
 </head>
 <body>
     <div class="top-bar">
-        <div class="site-title">fronius2vim</div>
+        <div class="site-title"><a href="/" class="active">fronius2vim</a>&nbsp;|&nbsp;<a href="/submetering">submetering</a></div>
         <div class="status-group">
             <div class="status-badge"><span class="status-dot disabled" id="mqttDot"></span><span id="mqttText">MQTT</span></div>
             <div class="status-badge"><span class="status-dot" id="wsDot"></span><span id="wsText">Connecting...</span></div>
@@ -846,12 +1064,164 @@ load();setInterval(load,5000);
 </html>
 """
 
+
+# ---------------------------------------------------------------------------
+# Submetering dashboard HTML
+# ---------------------------------------------------------------------------
+HTML_SUBMETERING = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Submetering Dashboard</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{--bg:#f3f3f7;--card:#fff;--border:#f9f9fb;--text:#28293e;--muted:#93949e;--green:#0fde41}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+        .top-bar{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
+        .site-title{font-size:1.125rem;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
+        .site-title a{color:var(--muted);text-decoration:none;font-weight:700}
+        .site-title a.active{color:var(--text)}
+        .site-title a:hover{color:var(--text);opacity:.8}
+        .status-group{display:flex;align-items:center;gap:16px}
+        .status-badge{display:flex;align-items:center;gap:8px;font-size:.875rem;color:var(--muted)}
+        .status-dot{width:8px;height:8px;border-radius:50%;background:#ef4444}
+        .status-dot.connected{background:var(--green)}
+        .status-dot.disabled{background:var(--muted);opacity:.5}
+        .container{max-width:900px;margin:0 auto;padding:24px}
+        .inv-card{background:var(--card);border-radius:16px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;justify-content:space-between;align-items:center}
+        #deviceCards{display:grid;gap:16px;margin-bottom:24px}
+        #deviceCards:has(.inv-card:nth-child(2)){grid-template-columns:repeat(2,1fr)}
+        @media(max-width:640px){#deviceCards:has(.inv-card:nth-child(2)){grid-template-columns:1fr}}
+        .inv-name{font-weight:600;font-size:1rem}
+        .inv-status{display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted)}
+        .inv-metrics{display:flex;gap:28px}
+        .inv-metric-val{font-size:1.5rem;font-weight:700}
+        .inv-metric-unit{font-size:.8rem;color:var(--muted);margin-left:2px}
+        .inv-metric-lbl{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+        .chart-card{background:var(--card);border-radius:16px;padding:20px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+        .chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+        .chart-title{font-size:.875rem;font-weight:600}
+        .timestamp{font-size:.75rem;color:var(--muted)}
+        .legend{display:flex;gap:16px;margin-bottom:16px;padding:10px 14px;background:#f9fafb;border-radius:8px}
+        .legend-item{display:flex;align-items:center;gap:6px;font-size:.75rem;color:var(--muted)}
+        .legend-color{width:12px;height:12px;border-radius:2px}
+        .footer{text-align:center;padding:24px;color:var(--muted);font-size:.75rem}
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="top-bar">
+        <div class="site-title"><a href="/">fronius2vim</a>&nbsp;|&nbsp;<a href="/submetering" class="active">submetering</a></div>
+        <div class="status-group">
+            <div class="status-badge"><span class="status-dot disabled" id="zigbeeDot"></span><span id="zigbeeText">Zigbee MQTT</span></div>
+            <div class="status-badge"><span class="status-dot" id="wsDot"></span><span id="wsText">Connecting...</span></div>
+            <a href="/admin" style="font-size:.8rem;color:var(--muted);text-decoration:none">admin</a>
+        </div>
+    </div>
+    <div class="container">
+        <div id="deviceCards"></div>
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">Energy Consumption Today</div>
+                <span class="timestamp" id="timestamp">--</span>
+            </div>
+            <div class="legend" id="todayLegend"></div>
+            <canvas id="combinedChart"></canvas>
+        </div>
+        <div class="chart-card">
+            <div class="chart-header"><div class="chart-title">Last 7 Days Consumption</div></div>
+            <div class="legend" id="sevenDayLegend"></div>
+            <canvas id="sevenDayChart"></canvas>
+        </div>
+    </div>
+    <div class="footer">fronius2vim &mdash; submetering</div>
+    <script>
+        const combinedCtx = document.getElementById('combinedChart').getContext('2d');
+        const combinedChart = new Chart(combinedCtx, {
+            type: 'bar',
+            data: {labels:[], datasets:[]},
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                interaction: {mode: 'index', intersect: false},
+                scales: {
+                    y: {
+                        type: 'linear',
+                        position: 'left',
+                        beginAtZero: true,
+                        stacked: true,
+                        grid: {color: 'rgba(0,0,0,.04)', drawBorder: false},
+                        ticks: {color: '#6b7280', font: {size: 11}}
+                    },
+                    y1: {
+                        type: 'linear',
+                        position: 'right',
+                        beginAtZero: true,
+                        grid: {display: false},
+                        ticks: {color: '#93949e', font: {size: 11}}
+                    },
+                    x: {
+                        type: 'category',
+                        stacked: true,
+                        grid: {display: false},
+                        ticks: {color: '#6b7280', font: {size: 11}, maxRotation: 45, autoSkip: true, maxTicksLimit: 12}
+                    }
+                },
+                plugins: {legend: {display: false}}
+            }
+        });
+        const PALETTE=['#0fde41','#faf000','#0ea5e9','#f97316','#a855f7','#ef4444','#14b8a6','#84cc16'];
+        const GREEN=['#166534','#15803d','#16a34a','#22c55e','#4ade80','#84cc16','#65a30d','#86efac'];
+        async function fetchCombinedData(){try{const r=await fetch('/api/submetering/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (power)',data:s.power_kw,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Power:</span>'+d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
+        fetchCombinedData();setInterval(fetchCombinedData,300000);
+
+        const sCtx = document.getElementById('sevenDayChart').getContext('2d');
+        const sevenDayChart = new Chart(sCtx, {
+            type:'bar',data:{labels:[],datasets:[]},
+            options:{responsive:true,maintainAspectRatio:true,scales:{y:{beginAtZero:true,stacked:true,grid:{color:'rgba(0,0,0,.04)',drawBorder:false},ticks:{color:'#93949e',font:{size:11}}},x:{type:'category',stacked:true,grid:{display:false},ticks:{color:'#93949e',font:{size:11}}}},plugins:{legend:{display:false}}}
+        });
+        async function fetchSevenDay(){try{const r=await fetch('/api/submetering/history/7days');const d=await r.json();if(d.days&&d.days.length&&d.series&&d.series.length){sevenDayChart.data.labels=d.days;sevenDayChart.data.datasets=d.series.map((s,i)=>{const c=GREEN[i%GREEN.length];return {label:s.name,data:s.kwh,backgroundColor:c+'cc',borderWidth:0,borderRadius:4,stack:'energy'}});sevenDayChart.update();document.getElementById('sevenDayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Energy:</span>'+d.series.map((s,i)=>{const c=GREEN[i%GREEN.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
+        fetchSevenDay();setInterval(fetchSevenDay,3600000);
+
+        let ws;
+        function renderCards(devices){const c=document.getElementById('deviceCards');c.innerHTML=devices.map(dev=>{const on=dev.online;
+            const p=dev.power!=null?dev.power.toFixed(1):'--';
+            const e=(dev.daily_kwh!=null?dev.daily_kwh:0).toFixed(2);
+            const u=dev.voltage!=null?dev.voltage.toFixed(0):'--';
+            const a=dev.current!=null?dev.current.toFixed(2):'--';
+            return `<div class="inv-card"><div><div class="inv-name">${dev.name}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span style="color:var(--muted);margin-left:8px">seen ${dev.last_seen||'--'}</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Today</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
+
+        function connect(){
+            ws=new WebSocket(`ws://${window.location.host}/ws`);
+            ws.onopen=()=>{document.getElementById('wsText').textContent='Connected';document.getElementById('wsDot').className='status-dot connected'};
+            ws.onmessage=(e)=>{
+                const d=JSON.parse(e.data);
+                if(d.zigbee_devices)renderCards(d.zigbee_devices);
+                if(d.timestamp)document.getElementById('timestamp').textContent=d.timestamp;
+                if(d.zigbee_status!==undefined){const m=document.getElementById('zigbeeDot');const t=document.getElementById('zigbeeText');if(d.zigbee_status==='connected'){m.className='status-dot connected';t.textContent='Zigbee MQTT'}else if(d.zigbee_status==='disconnected'){m.className='status-dot';t.textContent='Zigbee MQTT'}else{m.className='status-dot disabled';t.textContent='Zigbee MQTT (off)'}}
+            };
+            ws.onclose=()=>{document.getElementById('wsText').textContent='Disconnected';document.getElementById('wsDot').className='status-dot';setTimeout(connect,5000)};
+        }
+        connect();
+    </script>
+</body>
+</html>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     return HTML_DASHBOARD
+
+
+@app.get("/submetering", response_class=HTMLResponse)
+async def submetering():
+    return HTML_SUBMETERING
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -1152,6 +1522,161 @@ async def get_7day_history():
         return {"days": [], "series": [], "error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Submetering API (Zigbee devices via MQTT -> VictoriaMetrics)
+# ---------------------------------------------------------------------------
+@app.get("/api/submetering/data")
+async def submetering_data():
+    devices = zigbee_devices_snapshot()
+    out = []
+    for d in devices:
+        energy = zigbee_data.get(d["name"], {}).get("energy")
+        daily = await compute_zigbee_daily_kwh(d["name"], energy)
+        out.append({**d, "daily_kwh": daily})
+    status = "disabled" if not ZIGBEE_MQTT_HOST else (zigbee_subscriber.status if zigbee_subscriber else "disconnected")
+    return {"devices": out, "subscriber_status": status}
+
+
+@app.get("/api/submetering/today")
+async def submetering_today():
+    try:
+        with zigbee_lock:
+            device_names = sorted(zigbee_data.keys())
+
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        start_24h_utc = now_utc - timedelta(hours=24)
+        start_ts = int(start_24h_utc.timestamp())
+        query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
+
+        energy_params = {"query": "zigbee_energy_kilowatthours", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
+        power_params = {"query": "avg_over_time(zigbee_power_watts[15m])", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
+
+        async with httpx.AsyncClient() as client:
+            e_res, p_res = await asyncio.gather(
+                client.get(query_url, params=energy_params),
+                client.get(query_url, params=power_params),
+            )
+            e_res.raise_for_status()
+            p_res.raise_for_status()
+            e_data, p_data = e_res.json(), p_res.json()
+
+        # 15-minute energy deltas (kWh) from the continuous counter
+        e_series: Dict[str, Dict[int, float]] = {}
+        if e_data.get("status") == "success":
+            for result in e_data.get("data", {}).get("result", []):
+                name = (result.get("metric") or {}).get("device", "")
+                if not name:
+                    continue
+                series = e_series.setdefault(name, {})
+                values = result.get("values", [])
+                for i in range(1, len(values)):
+                    ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
+                    kwh = curr - prev
+                    if 0 <= kwh < 5:
+                        series[ts] = max(series.get(ts, 0.0), kwh)
+
+        p_series: Dict[str, Dict[int, float]] = {}
+        if p_data.get("status") == "success":
+            for result in p_data.get("data", {}).get("result", []):
+                name = (result.get("metric") or {}).get("device", "")
+                if not name:
+                    continue
+                series = p_series.setdefault(name, {})
+                for v in result.get("values", []):
+                    ts = int(v[0])
+                    val = round(float(v[1]), 0)
+                    series[ts] = max(series.get(ts, 0.0), val)
+
+        all_ts_set = set()
+        for d in e_series.values():
+            all_ts_set.update(d)
+        for d in p_series.values():
+            all_ts_set.update(d)
+        all_ts = sorted(all_ts_set)
+
+        series_out = []
+        for name in device_names:
+            per15 = e_series.get(name, {})
+            ppts = p_series.get(name, {})
+            hourly, cur = {}, 0.0
+            for ts in all_ts:
+                cur += per15.get(ts, 0.0)
+                if datetime.fromtimestamp(ts, LOCAL_TZ).minute == 0:
+                    hourly[ts - 1800] = round(cur, 2)
+                    cur = 0.0
+            if cur > 0 and all_ts:
+                hourly[all_ts[-1]] = round(cur, 2)
+
+            series_out.append({
+                "name": name,
+                "energy_kwh": [hourly.get(ts) for ts in all_ts],
+                "power_kw": [round(ppts.get(ts, 0.0) / 1000, 2) for ts in all_ts],
+            })
+
+        times = [datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%H:%M") for ts in all_ts]
+        return {"times": times, "series": series_out}
+    except Exception as e:
+        logger.error(f"Failed to fetch submetering today data: {e}")
+        return {"times": [], "series": [], "error": str(e)}
+
+
+@app.get("/api/submetering/history/7days")
+async def submetering_7day_history():
+    try:
+        with zigbee_lock:
+            device_names = sorted(zigbee_data.keys())
+
+        now = datetime.now(LOCAL_TZ)
+        days_list = []
+        for i in range(6, -1, -1):
+            day = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+            days_list.append({"date": day.strftime("%a %d"), "start_ts": int(day.timestamp())})
+
+        query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
+        params = {"query": "zigbee_energy_kilowatthours", "start": days_list[0]["start_ts"], "end": int(now.timestamp()), "step": "15m"}
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(query_url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        per_device: Dict[str, Dict[str, float]] = {name: {} for name in device_names}
+        if data.get("status") == "success":
+            for result in data.get("data", {}).get("result", []):
+                name = (result.get("metric") or {}).get("device", "")
+                if not name:
+                    continue
+                if name not in per_device:
+                    per_device[name] = {}
+
+                values_by_day: Dict[str, List[float]] = {}
+                for v in result.get("values", []):
+                    ts, kwh = int(v[0]), float(v[1])
+                    day_key = datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%Y-%m-%d")
+                    values_by_day.setdefault(day_key, []).append(kwh)
+
+                for day_key, vals in values_by_day.items():
+                    if len(vals) >= 2:
+                        diff = max(vals) - min(vals)
+                        if 0 <= diff < 1000:
+                            per_device[name][day_key] = max(per_device[name].get(day_key, 0.0), diff)
+
+        labels = [d["date"] for d in days_list]
+        series_out = []
+        for name in device_names:
+            by_day = per_device.get(name, {})
+            kwhs = []
+            for d in days_list:
+                day_key = datetime.fromtimestamp(d["start_ts"], LOCAL_TZ).strftime("%Y-%m-%d")
+                kwhs.append(round(by_day.get(day_key, 0.0), 2))
+            series_out.append({"name": name, "kwh": kwhs})
+
+        return {"days": labels, "series": series_out}
+    except Exception as e:
+        logger.error(f"Failed to fetch submetering 7-day history: {e}")
+        return {"days": [], "series": [], "error": str(e)}
+
+
 @app.get("/api/metrics-log")
 async def get_metrics_log():
     return {"metrics": metrics_log}
@@ -1165,10 +1690,13 @@ async def websocket_endpoint(websocket: WebSocket):
             configs = load_inverters()
             mqtt_any = any(mqtt_publishers.get(c.name) and mqtt_publishers[c.name].connected for c in configs)
             mqtt_status = "connected" if mqtt_any else ("disabled" if not MQTT_HOST else "disconnected")
+            zigbee_status = "disabled" if not ZIGBEE_MQTT_HOST else (zigbee_subscriber.status if zigbee_subscriber else "disconnected")
             await websocket.send_json({
                 "inverters": [{"name": c.name, "host": c.host, "data": inverters_data.get(c.name, {})} for c in configs],
                 "metrics_log": metrics_log,
                 "mqtt_status": mqtt_status,
+                "zigbee_devices": zigbee_devices_snapshot(),
+                "zigbee_status": zigbee_status,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
             await asyncio.sleep(REALTIME_INTERVAL)
@@ -1181,6 +1709,9 @@ async def websocket_endpoint(websocket: WebSocket):
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
+    global writer, zigbee_subscriber, main_loop
+
+    main_loop = asyncio.get_running_loop()
     writer = VictoriaMetricsWriter(VICTORIAMETRICS_URL)
     configs = load_inverters()
 
@@ -1193,6 +1724,20 @@ async def startup_event():
     else:
         logger.info("MQTT broker: disabled")
 
+    if ZIGBEE_MQTT_HOST:
+        logger.info(f"Zigbee MQTT broker: {ZIGBEE_MQTT_HOST}:{ZIGBEE_MQTT_PORT} (base topic '{ZIGBEE_MQTT_BASE}')")
+        zigbee_subscriber = ZigbeeMqttSubscriber(
+            host=ZIGBEE_MQTT_HOST,
+            port=ZIGBEE_MQTT_PORT,
+            base=ZIGBEE_MQTT_BASE,
+            username=ZIGBEE_MQTT_USERNAME or None,
+            password=ZIGBEE_MQTT_PASSWORD or None,
+        )
+        zigbee_subscriber.writer = writer
+    else:
+        logger.info("Zigbee MQTT: disabled")
+        zigbee_subscriber = None
+
     for cfg in configs:
         start_inverter_tasks(cfg, writer)
 
@@ -1201,6 +1746,8 @@ async def startup_event():
 async def shutdown_event():
     for name in list(mqtt_publishers.keys()):
         stop_inverter_tasks(name)
+    if zigbee_subscriber:
+        zigbee_subscriber.close()
 
 
 if __name__ == "__main__":
