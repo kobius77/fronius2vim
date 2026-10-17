@@ -1746,7 +1746,7 @@ async def backfill_zigbee_rename(old_name: str, new_name: str) -> None:
         timeout = httpx.Timeout(60.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             for metric in ZIGBEE_METRICS:
-                match = '{"__name__="%s",device="%s"}' % (_escape_vm_label(metric), old_esc)
+                match = '{{__name__="{}",device="{}"}}'.format(_escape_vm_label(metric), old_esc)
                 resp = await client.get(f"{VICTORIAMETRICS_URL}/api/v1/export", params={"match[]": match})
                 resp.raise_for_status()
                 lines: List[str] = []
@@ -1786,7 +1786,7 @@ async def backfill_zigbee_rename(old_name: str, new_name: str) -> None:
                 imported_points += len(lines)
             del_resp = await client.post(
                 f"{VICTORIAMETRICS_URL}/api/v1/admin/tsdb/delete_series",
-                params={"match[]": '{"__name__"=~"zigbee_.*",device="%s"}' % old_esc})
+                params={"match[]": '{{__name__=~"zigbee_.*",device="{}"}}'.format(old_esc)})
             delete_rc = del_resp.status_code
             if delete_rc not in (200, 204):
                 logger.warning(f"VM delete_series rc={delete_rc}: {del_resp.text[:200]}")
