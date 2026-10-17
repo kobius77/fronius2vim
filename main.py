@@ -1141,10 +1141,10 @@ HTML_SUBMETERING = """
         .legend-color{width:12px;height:12px;border-radius:2px}
         .footer{text-align:center;padding:24px;color:var(--muted);font-size:.75rem}
         .inv-card{position:relative}
-        .inv-card.paused{opacity:.55}
-        .inv-card.paused .inv-name:after{content:' (paused)';color:#b91c1c;font-weight:500}
-        .pause-btn{position:absolute;top:12px;right:14px;width:30px;height:30px;border:1px solid var(--border,#e5e7eb);border-radius:8px;background:transparent;cursor:pointer;font-size:.9rem;line-height:1;color:var(--muted);transition:all .15s}
-        .pause-btn:hover{background:#f3f4f6;color:#111}
+        .inv-card.paused{opacity:.6}
+        .inv-left{display:flex;align-items:center;gap:14px}
+        .pause-btn{background:none;border:none;outline:none;cursor:pointer;font-size:2rem;line-height:1;color:var(--text);display:flex;align-items:center;justify-content:center;width:2.4rem;height:2.4rem;padding:0;transition:color .15s}
+        .pause-btn:hover{color:#000}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -1229,7 +1229,7 @@ HTML_SUBMETERING = """
             const e=dev.energy!=null?dev.energy.toFixed(2):'--';
             const u=dev.voltage!=null?dev.voltage.toFixed(0):'--';
             const a=dev.current!=null?dev.current.toFixed(2):'--';
-            return `<div class="inv-card${dev.paused?' paused':''}"><button class="pause-btn" data-name="${dev.name}" title="${dev.paused?'Resume logging to VictoriaMetrics':'Pause logging to VictoriaMetrics'}">${dev.paused?'\u25B6':'\u23F8'}</button><div><div class="inv-name">${dev.name}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span style="color:var(--muted);margin-left:8px">seen ${dev.last_seen||'--'}</span></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Counter</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
+            return `<div class="inv-card${dev.paused?' paused':''}"><div class="inv-left"><button class="pause-btn" data-name="${dev.name}" title="${dev.paused?'Resume logging to VictoriaMetrics':'Pause logging to VictoriaMetrics'}">${dev.paused?'\u25B6':'\u2016\u2016'}</button><div><div class="inv-name">${dev.name}</div><div class="inv-status"><span class="status-dot ${on?'connected':'disabled'}"></span>${on?'Online':'Offline'}<span class="status-dot ${dev.paused?'disabled':'connected'}" style="margin-left:12px"></span>${dev.paused?'Paused':'Logging'}<span style="color:var(--muted);margin-left:12px">seen ${dev.last_seen||'--'}</span></div></div></div><div class="inv-metrics"><div><div class="inv-metric-val">${p}<span class="inv-metric-unit">W</span></div><div class="inv-metric-lbl">Power</div></div><div><div class="inv-metric-val">${e}<span class="inv-metric-unit">kWh</span></div><div class="inv-metric-lbl">Counter</div></div><div><div class="inv-metric-val">${u}<span class="inv-metric-unit">V</span></div><div class="inv-metric-lbl">Voltage</div></div><div><div class="inv-metric-val">${a}<span class="inv-metric-unit">A</span></div><div class="inv-metric-lbl">Current</div></div></div></div>`}).join('')||'<div class="inv-card" style="justify-content:center;color:var(--muted);font-style:italic">Waiting for Zigbee devices...</div>'}
         document.getElementById('deviceCards').addEventListener('click',(ev)=>{const b=ev.target.closest('.pause-btn');if(b)togglePause(b.dataset.name,ev)});
 
         function connect(){
