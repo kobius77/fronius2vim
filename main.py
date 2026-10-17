@@ -54,6 +54,18 @@ ZIGBEE_MQTT_PASSWORD = os.getenv("ZIGBEE_MQTT_PASSWORD", "").strip().strip("\"'"
 ZIGBEE_MQTT_BASE = os.getenv("ZIGBEE_MQTT_BASE", "zigbee2mqtt").strip().strip("\"'")
 ZIGBEE_ONLINE_GRACE = int(os.getenv("ZIGBEE_ONLINE_GRACE", "300"))
 
+# Spike quarantine: a power reading jumping above the device's recent level (EMA)
+# is held and only written once the next reading confirms the elevated level.
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+
+ZIGBEE_SPIKE_FACTOR = _env_float("ZIGBEE_SPIKE_FACTOR", 3.0)
+ZIGBEE_SPIKE_MARGIN = _env_float("ZIGBEE_SPIKE_MARGIN", 80.0)
+ZIGBEE_SPIKE_ABS = _env_float("ZIGBEE_SPIKE_ABS", 100.0)
+
 # Inverters persistence
 # Path is overridable (e.g. mount to a volume). Defaults to next to main.py.
 # Container default via docker-compose.example.yml: /app/data/inverters.json
@@ -530,6 +542,8 @@ class ZigbeeMqttSubscriber:
         sample["state"] = state if isinstance(state, (str, bool)) else None
 
         meta = self._track_device_topic(device, zigbee_meta, zigbee_data, sample)
+        confirmed_pending_power: Optional[float] = None
+        power_quarantined = False
         with zigbee_lock:
             is_paused = bool(meta.get("paused"))
             state_dirty = False
@@ -543,15 +557,46 @@ class ZigbeeMqttSubscriber:
                         pass
                 power = sample.get("power")
                 if power is not None:
-                    cur_max = meta.get("cycle_max_power")
-                    if cur_max is None or power > cur_max:
-                        meta["cycle_max_power"] = power
+                    ema = meta.get("power_ema")
+                    pending = meta.get("spike_pending")
+                    if ema is None:
+                        meta["power_ema"] = power
                         state_dirty = True
+                        if pending is not None:
+                            confirmed_pending_power = pending.get("power")
+                            meta["spike_pending"] = None
+                            state_dirty = True
+                    else:
+                        if pending is not None:
+                            try:
+                                pp = float(pending.get("power"))
+                            except (TypeError, ValueError):
+                                pp = 0.0
+                            if pp > 0 and power >= pp * 0.5:
+                                confirmed_pending_power = pp
+                            meta["spike_pending"] = None
+                            state_dirty = True
+                        if power <= ema * ZIGBEE_SPIKE_FACTOR + ZIGBEE_SPIKE_MARGIN or power < ZIGBEE_SPIKE_ABS:
+                            meta["power_ema"] = ema + 0.35 * (power - ema)
+                        else:
+                            power_quarantined = True
+                            meta["spike_pending"] = {"power": power}
+                            state_dirty = True
+                    if not power_quarantined:
+                        cur_max = meta.get("cycle_max_power")
+                        if cur_max is None or power > cur_max:
+                            meta["cycle_max_power"] = power
+                            state_dirty = True
+                        elif confirmed_pending_power and (cur_max is None or confirmed_pending_power > cur_max):
+                            meta["cycle_max_power"] = confirmed_pending_power
+                            state_dirty = True
             consumer = meta.get("consumer")
+        if confirmed_pending_power:
+            self._schedule_metric_writes(device, {"power": confirmed_pending_power, "last_seen": sample["last_seen"]}, consumer, power_only=True)
         if state_dirty:
             save_zigbee_state()
         if not is_paused:
-            self._schedule_metric_writes(device, sample, consumer)
+            self._schedule_metric_writes(device, sample, consumer, skip_power=power_quarantined)
 
     def _handle_bridge_devices(self, payload_bytes):
         try:
@@ -632,7 +677,8 @@ class ZigbeeMqttSubscriber:
             logger.debug(f"Rename backfill scheduling failed: {e}")
             self._pending_backfills.discard(key)
 
-    def _schedule_metric_writes(self, device: str, sample: Dict[str, Any], consumer: Optional[str] = None):
+    def _schedule_metric_writes(self, device: str, sample: Dict[str, Any], consumer: Optional[str] = None,
+                                skip_power: bool = False, power_only: bool = False):
         loop = main_loop
         if loop is None or self.writer is None:
             return
@@ -642,14 +688,18 @@ class ZigbeeMqttSubscriber:
                 labels = {"device": device}
                 if consumer:
                     labels["consumer"] = consumer
-                if sample.get("power") is not None:
-                    await self.writer.write_metric("zigbee_power_watts", sample["power"], labels)
-                if sample.get("energy") is not None:
-                    await self.writer.write_metric("zigbee_energy_kilowatthours", sample["energy"], labels)
-                if sample.get("current") is not None:
-                    await self.writer.write_metric("zigbee_current_amperes", sample["current"], labels)
-                if sample.get("voltage") is not None:
-                    await self.writer.write_metric("zigbee_voltage_volts", sample["voltage"], labels)
+                if not power_only:
+                    if not skip_power and sample.get("power") is not None:
+                        await self.writer.write_metric("zigbee_power_watts", sample["power"], labels)
+                    if sample.get("energy") is not None:
+                        await self.writer.write_metric("zigbee_energy_kilowatthours", sample["energy"], labels)
+                    if sample.get("current") is not None:
+                        await self.writer.write_metric("zigbee_current_amperes", sample["current"], labels)
+                    if sample.get("voltage") is not None:
+                        await self.writer.write_metric("zigbee_voltage_volts", sample["voltage"], labels)
+                else:
+                    if sample.get("power") is not None:
+                        await self.writer.write_metric("zigbee_power_watts", sample["power"], labels)
             except Exception as e:
                 logger.error(f"[zigbee/{device}] metric write error: {e}")
 
@@ -769,7 +819,7 @@ async def calculate_daily_energy(name: str, day_energy: float, total_energy: flo
     return 0.0
 
 
-ZIGBEE_META_KEYS = ("paused", "consumer", "ieee", "cycle_start_ts", "cycle_energy_start", "cycle_max_power")
+ZIGBEE_META_KEYS = ("paused", "consumer", "ieee", "cycle_start_ts", "cycle_energy_start", "cycle_max_power", "power_ema", "spike_pending")
 
 
 def load_zigbee_state() -> None:
