@@ -1677,18 +1677,24 @@ async def submetering_toggle_pause(name: str):
 
 
 async def get_zigbee_first_point(device: str) -> Optional[tuple]:
-    """Earliest recorded (energy, ts) pair for a device, tried via VM."""
+    """Earliest recorded (energy, ts) pair for a device."""
     try:
-        url = f"{VICTORIAMETRICS_URL}/api/v1/query"
-        params = {"query": f'first_over_time(zigbee_energy_kilowatthours{{device="{device}"}}[14d])'}
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
+        params = {
+            "query": f'zigbee_energy_kilowatthours{{device="{device}"}}',
+            "start": int(datetime.now(LOCAL_TZ).timestamp()) - 14 * 86400,
+            "end": int(datetime.now(LOCAL_TZ).timestamp()),
+            "step": "15m",
+        }
+        async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(url, params=params)
         if resp.status_code == 200:
             results = resp.json().get("data", {}).get("result", [])
-            values = results[0].get("values") if results else None
-            if values:
-                ts, val = int(float(values[0][0])), float(values[0][1])
-                return (val, ts)
+            for result in results:
+                values = result.get("values", [])
+                if values:
+                    ts, val = int(float(values[0][0])), float(values[0][1])
+                    return (val, ts)
     except Exception as e:
         logger.debug(f"[zigbee/{device}] first-point fetch failed: {e}")
     return None
