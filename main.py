@@ -1708,17 +1708,24 @@ async def submetering_set_consumer(name: str, payload: Dict[str, Any] = Body(...
         meta = zigbee_meta.setdefault(
             name, {"paused": False, "consumer": None, "cycle_start_ts": None,
                    "cycle_energy_start": None, "cycle_max_power": None})
+        prev = meta.get("consumer")
         meta["consumer"] = consumer or None
-        new_cycle_needed = meta["consumer"] is not None and meta.get("cycle_start_ts") is None
-    if new_cycle_needed:
+        named_now = meta["consumer"] is not None and prev is None
+    if named_now:
         first = await get_zigbee_first_point(name)
         with zigbee_lock:
-            if first and meta.get("cycle_start_ts") is None:
-                val, ts = first
-                meta = zigbee_meta[name]
-                meta["cycle_start_ts"] = ts
-                meta["cycle_energy_start"] = val
-        logger.info(f"Zigbee '{name}' consumer set to '{consumer or '-'}'; cycle backdated to first logged point")
+            meta = zigbee_meta[name]
+            if meta.get("consumer"):
+                if first:
+                    meta["cycle_energy_start"], meta["cycle_start_ts"] = first[0], first[1]
+                else:
+                    meta["cycle_energy_start"] = None
+                    meta["cycle_start_ts"] = None
+                meta["cycle_max_power"] = None
+        if first:
+            logger.info(f"Zigbee '{name}' consumer set to '{consumer}'; cycle backdated to first logged point")
+        else:
+            logger.info(f"Zigbee '{name}' consumer set to '{consumer}'; cycle starts with next reading")
     save_zigbee_state()
     return {"name": name, "consumer": meta.get("consumer")}
 
