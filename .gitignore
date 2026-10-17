@@ -2,6 +2,8 @@
 docker-compose.yml
 .env
 inverters.json
+zigbee_state.json
+zigbee_paused.json
 fronius2vim-data/
 
 # Python
