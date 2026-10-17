@@ -14,7 +14,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -66,6 +66,7 @@ INVERTERS_BACKUP = INVERTERS_FILE + ".bak"
 
 # Zigbee per-device state (pause flag, consumer name, per-cycle stats) — survives restarts
 ZIGBEE_STATE_FILE = os.path.join(os.path.dirname(INVERTERS_FILE), "zigbee_state.json")
+ZIGBEE_METRICS = ("zigbee_power_watts", "zigbee_energy_kilowatthours", "zigbee_current_amperes", "zigbee_voltage_volts")
 
 # Serializes read-modify-write of the inverter config (prevents races / lost updates)
 config_lock = asyncio.Lock()
@@ -463,6 +464,7 @@ class ZigbeeMqttSubscriber:
         self.writer: Optional[VictoriaMetricsWriter] = None
         self.client: Optional[mqtt.Client] = None
         self.connected: bool = False
+        self._pending_backfills: Set[str] = set()
 
         if not self.host:
             return
@@ -505,6 +507,9 @@ class ZigbeeMqttSubscriber:
         if not m.topic.startswith(self.prefix):
             return
         device = m.topic[len(self.prefix):]
+        if device == "bridge/devices":
+            self._handle_bridge_devices(m.payload)
+            return
         if not device or device.startswith("bridge/"):
             return
         try:
@@ -524,13 +529,8 @@ class ZigbeeMqttSubscriber:
         state = payload.get("state")
         sample["state"] = state if isinstance(state, (str, bool)) else None
 
+        meta = self._track_device_topic(device, zigbee_meta, zigbee_data, sample)
         with zigbee_lock:
-            zigbee_data[device] = sample
-            meta = zigbee_meta.get(device)
-            if meta is None:
-                meta = {"paused": False, "consumer": None, "cycle_start_ts": None,
-                        "cycle_energy_start": None, "cycle_max_power": None}
-                zigbee_meta[device] = meta
             is_paused = bool(meta.get("paused"))
             state_dirty = False
             if not is_paused:
@@ -552,6 +552,85 @@ class ZigbeeMqttSubscriber:
             save_zigbee_state()
         if not is_paused:
             self._schedule_metric_writes(device, sample, consumer)
+
+    def _handle_bridge_devices(self, payload_bytes):
+        try:
+            payload = json.loads(payload_bytes)
+        except (ValueError, TypeError):
+            return
+        devices = payload.get("devices") if isinstance(payload, dict) else payload
+        if not isinstance(devices, list):
+            return
+        ieee_map = {}
+        for d in devices:
+            if not isinstance(d, dict):
+                continue
+            fn = d.get("friendly_name") or d.get("friendlyName")
+            ieee = d.get("ieee_address") or d.get("ieeeAddr")
+            if fn and ieee:
+                ieee_map[str(ieee)] = str(fn)
+        if not ieee_map:
+            return
+        renames: List[tuple] = []
+        with zigbee_lock:
+            for ieee, fn in ieee_map.items():
+                current = next((n for n, mm in zigbee_meta.items() if mm.get("ieee") == ieee), None)
+                if current is None:
+                    target = zigbee_meta.get(fn)
+                    if target is not None:
+                        target["ieee"] = ieee
+                elif current != fn:
+                    src = zigbee_meta.pop(current, None)
+                    if src is None:
+                        continue
+                    src["ieee"] = ieee
+                    dst = zigbee_meta.setdefault(fn, src)
+                    for k in ZIGBEE_META_KEYS:
+                        dst[k] = src.get(k)
+                    s = zigbee_data.pop(current, None)
+                    if s is not None:
+                        zigbee_data[fn] = s
+                    renames.append((current, fn))
+        renames.sort()
+        save_zigbee_state()
+        for old, new in renames:
+            logger.info(f"Zigbee device renamed '{old}' -> '{new}' (rewriting VictoriaMetrics history)")
+            self._schedule_rename_backfill(old, new)
+
+    def _track_device_topic(self, device: str, metas: Dict[str, Dict[str, Any]],
+                            data: Dict[str, Dict[str, Any]], sample: Dict[str, Any]) -> Dict[str, Any]:
+        with zigbee_lock:
+            data[device] = sample
+            meta = metas.get(device)
+            if meta is None:
+                meta = {"paused": False, "consumer": None, "ieee": None, "cycle_start_ts": None,
+                        "cycle_energy_start": None, "cycle_max_power": None}
+                metas[device] = meta
+            return meta
+
+    def _schedule_rename_backfill(self, old: str, new: str):
+        loop = main_loop
+        if loop is None:
+            return
+        key = f"{old}\x00{new}"
+        if key in self._pending_backfills:
+            return
+        self._pending_backfills.add(key)
+
+        async def run():
+            try:
+                await backfill_zigbee_rename(old, new)
+                logger.info(f"VictoriaMetrics history rewritten '{old}' -> '{new}'")
+            except Exception as e:
+                logger.error(f"Zigbee rename backfill '{old}' -> '{new}' failed: {e}")
+            finally:
+                self._pending_backfills.discard(key)
+
+        try:
+            asyncio.run_coroutine_threadsafe(run(), loop)
+        except RuntimeError as e:
+            logger.debug(f"Rename backfill scheduling failed: {e}")
+            self._pending_backfills.discard(key)
 
     def _schedule_metric_writes(self, device: str, sample: Dict[str, Any], consumer: Optional[str] = None):
         loop = main_loop
@@ -690,7 +769,7 @@ async def calculate_daily_energy(name: str, day_energy: float, total_energy: flo
     return 0.0
 
 
-ZIGBEE_META_KEYS = ("paused", "consumer", "cycle_start_ts", "cycle_energy_start", "cycle_max_power")
+ZIGBEE_META_KEYS = ("paused", "consumer", "ieee", "cycle_start_ts", "cycle_energy_start", "cycle_max_power")
 
 
 def load_zigbee_state() -> None:
@@ -1641,6 +1720,80 @@ async def get_7day_history():
     except Exception as e:
         logger.error(f"Failed to fetch 7-day history: {e}")
         return {"days": [], "series": [], "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Zigbee rename handling: rewrite VictoriaMetrics history to the new device name
+# ---------------------------------------------------------------------------
+def _escape_vm_label(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _prometheus_series(metric: str, labels: Dict[str, str]) -> str:
+    if labels:
+        lab = ",".join('%s="%s"' % (k, _escape_vm_label(v)) for k, v in sorted(labels.items()))
+        return f"{metric}{{{lab}}}"
+    return metric
+
+
+async def backfill_zigbee_rename(old_name: str, new_name: str) -> None:
+    if not old_name or not new_name or old_name == new_name:
+        return
+    old_esc = _escape_vm_label(old_name)
+    imported_points = 0
+    delete_rc = None
+    try:
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for metric in ZIGBEE_METRICS:
+                match = '{"__name__="%s",device="%s"}' % (_escape_vm_label(metric), old_esc)
+                resp = await client.get(f"{VICTORIAMETRICS_URL}/api/v1/export", params={"match[]": match})
+                resp.raise_for_status()
+                lines: List[str] = []
+                for raw in resp.text.splitlines():
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except ValueError:
+                        continue
+                    src_labels = {k: str(v) for k, v in (rec.get("metric") or {}).items() if v is not None}
+                    labels = src_labels
+                    labels["device"] = new_name
+                    labels.pop("__name__", None)
+                    head = _prometheus_series(metric, labels)
+                    samples = rec.get("samples")
+                    if samples is None:
+                        values = rec.get("values") or []
+                        timestamps = rec.get("timestamps") or []
+                        samples = [(t, v) for v, t in zip(values, timestamps)]
+                    for sample in samples:
+                        try:
+                            ts_ms, val = int(float(sample[0])), sample[1]
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        sv = str(val)
+                        if sv.lower() in ("nan", "inf", "+inf", "-inf") or not sv:
+                            continue
+                        lines.append(f"{head} {sv} {ts_ms}")
+                for i in range(0, len(lines), 20000):
+                    chunk = "\n".join(lines[i:i + 20000]) + "\n"
+                    imp = await client.post(
+                        f"{VICTORIAMETRICS_URL}/api/v1/import/prometheus",
+                        content=chunk, headers={"Content-Type": "text/plain"})
+                    imp.raise_for_status()
+                imported_points += len(lines)
+            del_resp = await client.post(
+                f"{VICTORIAMETRICS_URL}/api/v1/admin/tsdb/delete_series",
+                params={"match[]": '{"__name__"=~"zigbee_.*",device="%s"}' % old_esc})
+            delete_rc = del_resp.status_code
+            if delete_rc not in (200, 204):
+                logger.warning(f"VM delete_series rc={delete_rc}: {del_resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"Rename backfill '{old_name}' -> '{new_name}' failed: {e}")
+        return
+    logger.info(f"Rename backfill '{old_name}' -> '{new_name}' done: imported={imported_points} old_series_deleted={delete_rc in (200, 204)}")
 
 
 # ---------------------------------------------------------------------------
