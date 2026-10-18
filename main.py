@@ -1420,7 +1420,7 @@ HTML_SUBMETERING = """
         });
         const PALETTE=['#0fde41','#faf000','#0ea5e9','#f97316','#a855f7','#ef4444','#14b8a6','#84cc16'];
         const GREEN=['#166534','#15803d','#16a34a','#22c55e','#4ade80','#84cc16','#65a30d','#86efac'];
-        async function fetchCombinedData(){try{const r=await fetch('/api/submetering/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (W)',data:s.power_w,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Power (W):</span>'+d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
+        async function fetchCombinedData(){try{const r=await fetch('/api/submetering/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (W)',data:s.power_w,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,spanGaps:true,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Power (W):</span>'+d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchCombinedData();setInterval(fetchCombinedData,300000);
 
         const sCtx = document.getElementById('sevenDayChart').getContext('2d');
@@ -2085,7 +2085,7 @@ async def submetering_today():
             series_out.append({
                 "name": display_names.get(name, name),
                 "energy_kwh": [hourly.get(ts) for ts in all_ts],
-                "power_w": [round(ppts.get(ts, 0.0), 1) for ts in all_ts],
+                "power_w": [round(ppts[ts], 1) if ts in ppts else None for ts in all_ts],
             })
 
         times = [datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%H:%M") for ts in all_ts]
