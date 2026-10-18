@@ -65,6 +65,7 @@ def _env_float(name: str, default: float) -> float:
 ZIGBEE_SPIKE_FACTOR = _env_float("ZIGBEE_SPIKE_FACTOR", 3.0)
 ZIGBEE_SPIKE_MARGIN = _env_float("ZIGBEE_SPIKE_MARGIN", 80.0)
 ZIGBEE_SPIKE_ABS = _env_float("ZIGBEE_SPIKE_ABS", 100.0)
+ZIGBEE_SPIKE_CONFIRM_AFTER = _env_float("ZIGBEE_SPIKE_CONFIRM_AFTER", 10.0)
 
 # Inverters persistence
 # Path is overridable (e.g. mount to a volume). Defaults to next to main.py.
@@ -570,9 +571,11 @@ class ZigbeeMqttSubscriber:
                         if pending is not None:
                             try:
                                 pp = float(pending.get("power"))
+                                p_ts = int(pending.get("ts") or 0)
                             except (TypeError, ValueError):
-                                pp = 0.0
-                            if pp > 0 and power >= pp * 0.5:
+                                pp, p_ts = 0.0, 0
+                            now_ts = int(sample["last_seen"].timestamp())
+                            if pp > 0 and p_ts and now_ts - p_ts >= ZIGBEE_SPIKE_CONFIRM_AFTER and power >= pp * 0.5:
                                 confirmed_pending_power = pp
                             meta["spike_pending"] = None
                             state_dirty = True
@@ -580,7 +583,10 @@ class ZigbeeMqttSubscriber:
                             meta["power_ema"] = ema + 0.35 * (power - ema)
                         else:
                             power_quarantined = True
-                            meta["spike_pending"] = {"power": power}
+                            if pending is None:
+                                meta["spike_pending"] = {"power": power, "ts": int(sample["last_seen"].timestamp())}
+                            else:
+                                meta["spike_pending"] = pending
                             state_dirty = True
                     if not power_quarantined:
                         cur_max = meta.get("cycle_max_power")
@@ -1414,7 +1420,7 @@ HTML_SUBMETERING = """
         });
         const PALETTE=['#0fde41','#faf000','#0ea5e9','#f97316','#a855f7','#ef4444','#14b8a6','#84cc16'];
         const GREEN=['#166534','#15803d','#16a34a','#22c55e','#4ade80','#84cc16','#65a30d','#86efac'];
-        async function fetchCombinedData(){try{const r=await fetch('/api/submetering/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (power)',data:s.power_kw,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Power:</span>'+d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
+        async function fetchCombinedData(){try{const r=await fetch('/api/submetering/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (W)',data:s.power_w,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Power (W):</span>'+d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchCombinedData();setInterval(fetchCombinedData,300000);
 
         const sCtx = document.getElementById('sevenDayChart').getContext('2d');
@@ -2013,8 +2019,8 @@ async def submetering_today():
             display_names = {n: (zigbee_meta.get(n, {}).get("consumer") or n) for n in device_names}
 
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        start_24h_utc = now_utc - timedelta(hours=24)
-        start_ts = int(start_24h_utc.timestamp())
+        start_window_utc = now_utc - timedelta(hours=6)
+        start_ts = int(start_window_utc.timestamp())
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
 
         energy_params = {"query": "zigbee_energy_kilowatthours", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
@@ -2077,9 +2083,9 @@ async def submetering_today():
                 hourly[all_ts[-1]] = round(cur, 2)
 
             series_out.append({
-                "name": name,
+                "name": display_names.get(name, name),
                 "energy_kwh": [hourly.get(ts) for ts in all_ts],
-                "power_kw": [round(ppts.get(ts, 0.0) / 1000, 2) for ts in all_ts],
+                "power_w": [round(ppts.get(ts, 0.0), 1) for ts in all_ts],
             })
 
         times = [datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%H:%M") for ts in all_ts]
