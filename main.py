@@ -1340,7 +1340,9 @@ HTML_SUBMETERING = """
         .modal-actions{display:flex;gap:8px;justify-content:flex-end}
         .consumers-title{font-size:.875rem;font-weight:600;margin:2px 0 10px}
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1"></script>
 </head>
 <body>
     <div class="top-bar">
@@ -1409,10 +1411,11 @@ HTML_SUBMETERING = """
                         ticks: {color: '#93949e', font: {size: 11}}
                     },
                     x: {
-                        type: 'category',
+                        type: 'time',
                         stacked: true,
                         grid: {display: false},
-                        ticks: {color: '#6b7280', font: {size: 11}, maxRotation: 45, autoSkip: true, maxTicksLimit: 12}
+                        time: {unit: 'minute', displayFormats: {minute: 'HH:mm', hour: 'HH:mm'}},
+                        ticks: {color: '#6b7280', font: {size: 11}, maxRotation: 0, autoSkip: true, maxTicksLimit: 8}
                     }
                 },
                 plugins: {legend: {display: false}}
@@ -1420,7 +1423,7 @@ HTML_SUBMETERING = """
         });
         const PALETTE=['#0fde41','#faf000','#0ea5e9','#f97316','#a855f7','#ef4444','#14b8a6','#84cc16'];
         const GREEN=['#166534','#15803d','#16a34a','#22c55e','#4ade80','#84cc16','#65a30d','#86efac'];
-        async function fetchCombinedData(){try{const r=await fetch('/api/submetering/today');const d=await r.json();if(d.times&&d.times.length&&d.series&&d.series.length){combinedChart.data.labels=d.times;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy_kwh,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barPercentage:1.0,categoryPercentage:3.5,order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (W)',data:s.power_w,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,spanGaps:true,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Power (W):</span>'+d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
+        async function fetchCombinedData(){try{const r=await fetch('/api/submetering/today');const d=await r.json();if(d.series&&d.series.length){combinedChart.data.labels=undefined;combinedChart.data.datasets=[];d.series.forEach((s,i)=>{const c=PALETTE[i%PALETTE.length];combinedChart.data.datasets.push({type:'bar',label:s.name,data:s.energy,backgroundColor:GREEN[i%GREEN.length]+'cc',borderWidth:0,borderRadius:3,stack:'energy',barThickness:(ctx)=>{const x=ctx.chart.scales.x;const msPerPx=(x.max-x.min)/(x.width||1);return Math.max(2,Math.min(msPerPx*870000*0.94,60))},order:2});combinedChart.data.datasets.push({type:'line',label:s.name+' (W)',data:s.power,borderColor:c,backgroundColor:'transparent',borderWidth:2,tension:.4,pointRadius:0,spanGaps:true,yAxisID:'y1',order:1})});combinedChart.update();document.getElementById('todayLegend').innerHTML='<span style="font-weight:600;font-size:.75rem;color:var(--muted)">Power (W):</span>'+d.series.map((s,i)=>{const c=PALETTE[i%PALETTE.length];return `<div class="legend-item"><div class="legend-color" style="background:${c}"></div><span>${s.name}</span></div>`}).join('')}}catch(e){}}
         fetchCombinedData();setInterval(fetchCombinedData,300000);
 
         const sCtx = document.getElementById('sevenDayChart').getContext('2d');
@@ -2019,12 +2022,13 @@ async def submetering_today():
             display_names = {n: (zigbee_meta.get(n, {}).get("consumer") or n) for n in device_names}
 
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        start_window_utc = now_utc - timedelta(hours=6)
-        start_ts = int(start_window_utc.timestamp())
+        start_ts = int((now_utc - timedelta(hours=6)).timestamp())
+        start_ts -= start_ts % 900
+        end_ts = int(now_utc.timestamp())
         query_url = f"{VICTORIAMETRICS_URL}/api/v1/query_range"
 
-        energy_params = {"query": "zigbee_energy_kilowatthours", "start": start_ts, "end": int(now_utc.timestamp()), "step": "15m"}
-        power_params = {"query": "zigbee_power_watts", "start": start_ts, "end": int(now_utc.timestamp()), "step": "30s"}
+        energy_params = {"query": "zigbee_energy_kilowatthours", "start": start_ts, "end": end_ts, "step": "15m"}
+        power_params = {"query": "zigbee_power_watts", "start": start_ts, "end": end_ts, "step": "30s"}
 
         async with httpx.AsyncClient() as client:
             e_res, p_res = await asyncio.gather(
@@ -2035,7 +2039,7 @@ async def submetering_today():
             p_res.raise_for_status()
             e_data, p_data = e_res.json(), p_res.json()
 
-        # 15-minute energy deltas (kWh) from the continuous counter
+        # energy consumption per real quarter-hour (kWh), keyed by the quarter's start ts
         e_series: Dict[str, Dict[int, float]] = {}
         if e_data.get("status") == "success":
             for result in e_data.get("data", {}).get("result", []):
@@ -2045,10 +2049,11 @@ async def submetering_today():
                 series = e_series.setdefault(name, {})
                 values = result.get("values", [])
                 for i in range(1, len(values)):
-                    ts, curr, prev = int(values[i][0]), float(values[i][1]), float(values[i - 1][1])
-                    kwh = curr - prev
+                    q_start = int(float(values[i - 1][0]))
+                    q_start -= q_start % 900
+                    kwh = float(values[i][1]) - float(values[i - 1][1])
                     if 0 <= kwh < 5:
-                        series[ts] = max(series.get(ts, 0.0), kwh)
+                        series[q_start] = max(series.get(q_start, 0.0), kwh)
 
         p_series: Dict[str, Dict[int, float]] = {}
         if p_data.get("status") == "success":
@@ -2062,37 +2067,20 @@ async def submetering_today():
                     val = round(float(v[1]), 0)
                     series[ts] = max(series.get(ts, 0.0), val)
 
-        all_ts_set = set()
-        for d in e_series.values():
-            all_ts_set.update(d)
-        for d in p_series.values():
-            all_ts_set.update(d)
-        all_ts = sorted(all_ts_set)
-
         series_out = []
         for name in device_names:
-            per15 = e_series.get(name, {})
+            per_q = e_series.get(name, {})
             ppts = p_series.get(name, {})
-            hourly, cur = {}, 0.0
-            for ts in all_ts:
-                cur += per15.get(ts, 0.0)
-                if datetime.fromtimestamp(ts, LOCAL_TZ).minute == 0:
-                    hourly[ts - 1800] = round(cur, 2)
-                    cur = 0.0
-            if cur > 0 and all_ts:
-                hourly[all_ts[-1]] = round(cur, 2)
-
             series_out.append({
                 "name": display_names.get(name, name),
-                "energy_kwh": [hourly.get(ts) for ts in all_ts],
-                "power_w": [round(ppts[ts], 1) if ts in ppts else None for ts in all_ts],
+                "energy": [{"x": ts * 1000, "y": round(kwh, 3)} for ts, kwh in sorted(per_q.items())],
+                "power": [{"x": ts * 1000, "y": round(val, 1)} for ts, val in sorted(ppts.items())],
             })
 
-        times = [datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%H:%M") for ts in all_ts]
-        return {"times": times, "series": series_out}
+        return {"series": series_out}
     except Exception as e:
         logger.error(f"Failed to fetch submetering today data: {e}")
-        return {"times": [], "series": [], "error": str(e)}
+        return {"series": [], "error": str(e)}
 
 
 @app.get("/api/submetering/history/7days")
