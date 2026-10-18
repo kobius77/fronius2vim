@@ -583,10 +583,7 @@ class ZigbeeMqttSubscriber:
                             meta["power_ema"] = ema + 0.35 * (power - ema)
                         else:
                             power_quarantined = True
-                            if pending is None:
-                                meta["spike_pending"] = {"power": power, "ts": int(sample["last_seen"].timestamp())}
-                            else:
-                                meta["spike_pending"] = pending
+                            meta["spike_pending"] = {"power": power, "ts": int(sample["last_seen"].timestamp())}
                             state_dirty = True
                     if not power_quarantined:
                         cur_max = meta.get("cycle_max_power")
