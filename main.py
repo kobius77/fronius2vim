@@ -1104,7 +1104,7 @@ HTML_DASHBOARD = """
 </head>
 <body>
     <div class="top-bar">
-        <div class="site-title"><a href="/" class="active">fronius2vim</a>&nbsp;|&nbsp;<a href="/submetering">submetering</a></div>
+        <div class="site-title"><a href="/">submetering</a>&nbsp;|&nbsp;<a href="/fronius2vim" class="active">fronius2vim</a></div>
         <div class="status-group">
             <div class="status-badge"><span class="status-dot disabled" id="mqttDot"></span><span id="mqttText">MQTT</span></div>
             <div class="status-badge"><span class="status-dot" id="wsDot"></span><span id="wsText">Connecting...</span></div>
@@ -1346,7 +1346,7 @@ HTML_SUBMETERING = """
 </head>
 <body>
     <div class="top-bar">
-        <div class="site-title"><a href="/">fronius2vim</a>&nbsp;|&nbsp;<a href="/submetering" class="active">submetering</a></div>
+        <div class="site-title"><a href="/" class="active">submetering</a>&nbsp;|&nbsp;<a href="/fronius2vim">fronius2vim</a></div>
         <div class="status-group">
             <div class="status-badge"><span class="status-dot disabled" id="zigbeeDot"></span><span id="zigbeeText">Zigbee MQTT</span></div>
             <div class="status-badge"><span class="status-dot" id="wsDot"></span><span id="wsText">Connecting...</span></div>
@@ -1466,12 +1466,17 @@ HTML_SUBMETERING = """
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
+async def submetering_page():
+    return HTML_SUBMETERING
+
+
+@app.get("/fronius2vim", response_class=HTMLResponse)
 async def dashboard():
     return HTML_DASHBOARD
 
 
 @app.get("/submetering", response_class=HTMLResponse)
-async def submetering():
+async def submetering_legacy():
     return HTML_SUBMETERING
 
 
