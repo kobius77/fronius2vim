@@ -116,7 +116,9 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 | `ZIGBEE_MQTT_USERNAME` | _(empty)_ | Zigbee MQTT username (optional) |
 | `ZIGBEE_MQTT_PASSWORD` | _(empty)_ | Zigbee MQTT password (optional) |
 | `ZIGBEE_MQTT_BASE` | `zigbee2mqtt` | Base topic to subscribe to (`{base}/#`, bridge topics ignored) |
-| `ZIGBEE_ONLINE_GRACE` | `300` | Seconds without a report before a device is marked offline |
+| `ZIGBEE_ONLINE_GRACE` | `300` | Seconds without a report before a device is marked offline (fallback if Zigbee2MQTT availability is disabled) |
+
+> **Device visibility**: the submetering dashboard shows only devices that are currently **online** — online state is taken from Zigbee2MQTT's [availability](https://www.zigbee2mqtt.io/guide/configuration/availability.html) feature (`zigbee2mqtt/<device>/availability`) when it is published; otherwise a device is considered online if it reported data within `ZIGBEE_ONLINE_GRACE` seconds. Offline devices stay hidden until they report again; their VictoriaMetrics history is unaffected. Enabling availability in Zigbee2MQTT's config is recommended for accurate results (especially with battery-powered devices).
 
 ---
 
@@ -132,7 +134,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed setup instructions.
 - `DELETE /api/inverters/{name}` - Remove an inverter
 - `GET /api/today` - 24-hour combined hourly energy and 15m power history (from VictoriaMetrics)
 - `GET /api/history/7days` - 7-day daily energy generation history (from VictoriaMetrics)
-- `GET /api/submetering/data` - Current status of all Zigbee devices (JSON)
+- `GET /api/submetering/data` - Current status of online Zigbee devices (JSON)
 - `GET /api/submetering/today` - 24-hour combined hourly energy and 15m power history for Zigbee devices (from VictoriaMetrics)
 - `GET /api/submetering/history/7days` - 7-day daily energy consumption history for Zigbee devices (from VictoriaMetrics)
 - `GET /api/metrics-log` - Last 50 metric writes to VictoriaMetrics

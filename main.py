@@ -525,6 +525,9 @@ class ZigbeeMqttSubscriber:
             return
         if not device or device.startswith("bridge/"):
             return
+        if device.endswith("/availability"):
+            self._handle_availability(device[: -len("/availability")], m.payload)
+            return
         try:
             payload = json.loads(m.payload)
         except (ValueError, TypeError):
@@ -638,12 +641,35 @@ class ZigbeeMqttSubscriber:
                     s = zigbee_data.pop(current, None)
                     if s is not None:
                         zigbee_data[fn] = s
+                    av = zigbee_availability.pop(current, None)
+                    if av is not None:
+                        zigbee_availability[fn] = av
                     renames.append((current, fn))
         renames.sort()
         save_zigbee_state()
         for old, new in renames:
             logger.info(f"Zigbee device renamed '{old}' -> '{new}' (rewriting VictoriaMetrics history)")
             self._schedule_rename_backfill(old, new)
+
+    def _handle_availability(self, device: str, payload_bytes) -> None:
+        """zigbee2mqtt availability feature: <device>/availability -> {"state": "online"|"offline"}."""
+        try:
+            payload = json.loads(payload_bytes)
+        except (ValueError, TypeError):
+            payload = payload_bytes.decode(errors="ignore") if isinstance(payload_bytes, (bytes, bytearray)) else None
+        if isinstance(payload, dict):
+            state = payload.get("state")
+        elif isinstance(payload, str):
+            state = payload
+        else:
+            state = None
+        if not isinstance(state, str):
+            return
+        state = state.strip().lower()
+        if state not in ("online", "offline"):
+            return
+        with zigbee_lock:
+            zigbee_availability[device] = state == "online"
 
     def _track_device_topic(self, device: str, metas: Dict[str, Dict[str, Any]],
                             data: Dict[str, Dict[str, Any]], sample: Dict[str, Any]) -> Dict[str, Any]:
@@ -744,6 +770,7 @@ midnight_baselines: Dict[str, Dict[str, Any]] = {}
 
 zigbee_data: Dict[str, Dict[str, Any]] = {}
 zigbee_lock = threading.Lock()
+zigbee_availability: Dict[str, bool] = {}  # friendly_name -> zigbee2mqtt availability state (transient)
 zigbee_daily_baselines: Dict[str, Dict[str, Any]] = {}
 zigbee_meta: Dict[str, Dict[str, Any]] = {}
 main_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -864,16 +891,34 @@ def save_zigbee_state() -> None:
         logger.error(f"Failed to save Zigbee state file: {e}")
 
 
+def _resolve_availability(name: str) -> Optional[bool]:
+    """zigbee2mqtt availability for `name`; walks up subtopic parents (e.g. 'Plug/e1' -> 'Plug')."""
+    avail = zigbee_availability.get(name)
+    key = name
+    while avail is None and "/" in key:
+        key = key.rsplit("/", 1)[0]
+        avail = zigbee_availability.get(key)
+    return avail
+
+
 def zigbee_devices_snapshot() -> List[Dict[str, Any]]:
     now = datetime.now(LOCAL_TZ)
     with zigbee_lock:
         items = []
         for name, s in zigbee_data.items():
             last = s.get("last_seen", now)
-            try:
-                online = (now - last).total_seconds() <= ZIGBEE_ONLINE_GRACE
-            except TypeError:
-                online = False
+            # Prefer zigbee2mqtt's availability state; fall back to the last-seen grace
+            # for setups where the availability feature is disabled.
+            avail = _resolve_availability(name)
+            if avail is not None:
+                online = avail
+            else:
+                try:
+                    online = (now - last).total_seconds() <= ZIGBEE_ONLINE_GRACE
+                except TypeError:
+                    online = False
+            if not online:
+                continue  # offline devices are hidden entirely
             meta = zigbee_meta.get(name, {})
             items.append({
                 "name": name,
@@ -887,8 +932,6 @@ def zigbee_devices_snapshot() -> List[Dict[str, Any]]:
                 "online": online,
                 "paused": bool(meta.get("paused")),
             })
-    items.sort(key=lambda d: d["name"])
-    return items
     items.sort(key=lambda d: d["name"])
     return items
 
@@ -1427,7 +1470,7 @@ HTML_SUBMETERING = """
 
         let ws;let zigDevCache=[];
         function togglePause(name,ev){ev.stopPropagation();const d=zigDevCache.find(x=>x.name===name);if(d){d.paused=!d.paused;renderCards(zigDevCache)}fetch('/api/submetering/device/'+encodeURIComponent(name)+'/pause',{method:'POST'}).catch(()=>{})}
-        function renderCards(devices){zigDevCache=devices;const c=document.getElementById('deviceCards');c.innerHTML=devices.map(dev=>{const on=dev.online;
+        function renderCards(devices){zigDevCache=devices;const shown=devices.filter(d=>d.online);const c=document.getElementById('deviceCards');c.innerHTML=shown.map(dev=>{const on=true;
             const p=dev.power!=null?dev.power.toFixed(1):'--';
             const e=dev.energy!=null?dev.energy.toFixed(2):'--';
             const u=dev.voltage!=null?dev.voltage.toFixed(0):'--';
